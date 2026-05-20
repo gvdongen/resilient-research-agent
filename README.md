@@ -209,20 +209,14 @@ export SLACK_DIGEST_CHANNEL_ID=C...      # phase 3 only, OPTIONAL — invite the
 
 If `SLACK_BOT_TOKEN` or `SLACK_DIGEST_CHANNEL_ID` is unset, phase 3 prints
 the digest and the final report to the service's stdout instead of posting
-to Slack. The awakeable curl is still printed, so you can resolve the
-deep-dive prompt the same way:
-
-```
-curl http://localhost:8080/restate/awakeables/<awk_id>/resolve --json '"..."'
-```
+to Slack. 
 
 ## Run
 
 Restate server in one terminal:
 
 ```bash
-docker run --name restate_dev --rm \
--p 8080:8080 -p 9070:9070 -p 9071:9071 \
+docker run -p 8080:8080 -p 9070:9070 -p 9071:9071 \
 --add-host=host.docker.internal:host-gateway \
 docker.restate.dev/restatedev/restate:latest
 ```
@@ -231,17 +225,17 @@ Pick an implementation and run it in another terminal:
 
 ```bash
 # Canonical LangChain version
-cd app && uv run python app.py
+cd app && uv run python app/app.py
 
 # — or — manual litellm loop
-cd app_litellm && uv run python app.py
+cd app_litellm && uv run python app_litellm/app.py
 ```
 
-Register with Restate (once per restart):
+Register with Restate. Go to the UI at `localhost:9070` and register the service deployment at `http://host.docker.internal:9080`.
 
-```bash
-restate deployments register http://host.docker.internal:9080 --force --yes
-```
+The UI then shows all the services that were registered:
+
+![overview services](./docs/img/overview-ui.png)
 
 ## Invoke
 
@@ -251,10 +245,10 @@ curl localhost:8080/ResilientResearchAgent/search \
   --json '"What changed in Postgres 17 logical replication?"'
 
 # Phase 2 — conversation keyed by user
-curl localhost:8080/StatefulResearchAgent/giselle/ask \
+curl localhost:8080/StatefulResearchAgent/session123/ask \
   --json '"Summarize recent advances in durable execution."'
 
-curl localhost:8080/StatefulResearchAgent/giselle/ask \
+curl localhost:8080/StatefulResearchAgent/session123/ask \
   --json '"Tell me more about the second source."'
 
 # Phase 3 — autonomous daily news+deep-research loop on a topic
@@ -269,5 +263,21 @@ curl http://localhost:8080/restate/awakeables/<awk_id>/resolve \
   --json '"Tell me more about the second story"'
 ```
 
+Check the execution trace in the Restate UI:
+
+
+
 To stop the daily loop, cancel the pending invocation in the Restate UI
 (`http://localhost:9070`).
+
+
+
+
+
+
+
+
+
+
+
+

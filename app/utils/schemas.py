@@ -85,3 +85,11 @@ class DailyResult(BaseModel):
 
     news: NewsDigest
     report: FinalReport | None = None
+
+
+class ResearchRequest(BaseModel):
+    """A deep dive topic from the daily news digest that needs further research"""
+    model_config = ConfigDict(extra="forbid")
+
+    topic: str
+    news: NewsDigest

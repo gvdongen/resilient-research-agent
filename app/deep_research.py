@@ -18,13 +18,7 @@ import restate
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from restate.ext.langchain import RestateMiddleware
-from utils.schemas import (
-    DailyResult,
-    FinalReport,
-    NewsDigest,
-    ResearchPlan,
-    SubReport,
-)
+from utils.schemas import *
 from utils.tools import summarize, to_brief, post_news, post_report
 from langchain_core.tools import tool
 from restate.ext.langchain import restate_context
@@ -131,8 +125,8 @@ planner_agent = restate.Service("PlannerAgent")
 
 
 @planner_agent.handler()
-async def plan(_ctx: restate.Context, brief: str) -> ResearchPlan:
-    result = await planner.ainvoke({"messages": brief})
+async def plan(_ctx: restate.Context, req: ResearchRequest) -> ResearchPlan:
+    result = await planner.ainvoke({"messages": summarize(req.topic, req.news)})
     return result["structured_response"]
 
 
@@ -175,25 +169,29 @@ async def run(ctx: restate.Context, topic: str) -> DailyResult:
         decision=decision_promise,
         timeout=ctx.sleep(timedelta(days=1)),
     ):
-        case ["timeout"]:
-            return DailyResult(news=news)
         case ["decision", answer]:
-            deep_dive_topic = answer
+            return await ctx.service_call(deep_research, arg=ResearchRequest(topic=answer, news=news))
+        case _:
+            return DailyResult(news=news)
 
-    # Stage 3 — plan
-    research_plan = await ctx.service_call(plan, arg=summarize(deep_dive_topic, news))
 
-    # Stage 4 — fan out one Researcher per subtopic, in parallel
+
+@agent.handler()
+async def deep_research(ctx: restate.Context, req: ResearchRequest) -> DailyResult:
+    # Stage 1 — plan
+    research_plan = await ctx.service_call(plan, arg=req)
+
+    # Stage 2 — fan out one Researcher per subtopic, in parallel
     handles = [
-        ctx.service_call(investigate, arg=sub)
-        for sub in research_plan.subtopics
+        ctx.service_call(investigate, arg=subtopic)
+        for subtopic in research_plan.subtopics
     ]
     await restate.gather(*handles)
     sub_reports = [await h for h in handles]
 
-    # Stage 5 — synthesize the final report
-    report = await ctx.service_call(write, arg=to_brief(deep_dive_topic, research_plan, sub_reports))
+    # Stage 3 — synthesize the final report
+    report = await ctx.service_call(write, arg=to_brief(req.topic, research_plan, sub_reports))
 
-    # Stage 6 — deliver the report
-    await ctx.run_typed("slack-topic-report", post_report, topic=deep_dive_topic, report=report)
-    return DailyResult(news=news, report=report)
+    # Stage 4 — deliver the report
+    await ctx.run_typed("slack-topic-report", post_report, topic=req.topic, report=report)
+    return DailyResult(news=req.news, report=report)
