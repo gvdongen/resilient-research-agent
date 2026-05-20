@@ -157,7 +157,21 @@ def to_brief(topic: str, plan: ResearchPlan, sub_reports: list[SubReport]) -> st
 
 # ---- Slack delivery ---------------------------------------------------------
 
-slack_client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
+import logging
+
+logger = logging.getLogger("deep_research")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+
+
+def _slack() -> tuple[WebClient, str] | None:
+    """Return (client, channel) if both env vars are set, else None."""
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    channel = os.environ.get("SLACK_DIGEST_CHANNEL_ID")
+    if not token or not channel:
+        return None
+    return WebClient(token=token), channel
 
 
 def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
@@ -170,6 +184,15 @@ def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
         for i in digest.items
     )
 
+    slack = _slack()
+    if slack is None:
+        logger.info(
+            "\n=== Today's news: %s ===\n%s\n\n%s\n\n▶ Want to dive deeper?\n%s\n",
+            topic, digest.overview, items_md, yes_cmd,
+        )
+        return "log:news"
+
+    client, channel = slack
     blocks: list[dict] = [
         {"type": "header",
          "text": {"type": "plain_text", "text": f"Today's news: {topic}"}},
@@ -185,8 +208,8 @@ def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
              f"```{yes_cmd}```\n\n"
          )}},
     ]
-    resp = slack_client.chat_postMessage(
-        channel=os.environ["SLACK_DIGEST_CHANNEL_ID"],
+    resp = client.chat_postMessage(
+        channel=channel,
         text=f"Today's news: {topic} — dive deeper?",
         blocks=blocks,
     )
@@ -195,6 +218,17 @@ def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
 
 def post_report(topic: str, report: FinalReport) -> str:
     """Post the FinalReport (rich Block Kit). Returns the message ts."""
+    slack = _slack()
+    if slack is None:
+        sections = "\n\n".join(f"## {s.heading}\n{s.body}" for s in report.sections)
+        sources = "\n".join(f"• {s}" for s in report.sources)
+        logger.info(
+            "\n=== Deep research: %s ===\n# %s\n\n%s\n\n%s\n\nSources:\n%s\n",
+            topic, report.headline, report.executive_summary, sections, sources,
+        )
+        return "log:report"
+
+    client, channel = slack
     blocks: list[dict] = [
         {"type": "header",
          "text": {"type": "plain_text", "text": f"Deep research: {topic}"}},
@@ -218,8 +252,8 @@ def post_report(topic: str, report: FinalReport) -> str:
                           "text": "Sources:\n" + "\n".join(f"• <{s}>" for s in report.sources)}],
         })
 
-    resp = slack_client.chat_postMessage(
-        channel=os.environ["SLACK_DIGEST_CHANNEL_ID"],
+    resp = client.chat_postMessage(
+        channel=channel,
         text=report.headline,
         blocks=blocks,
     )

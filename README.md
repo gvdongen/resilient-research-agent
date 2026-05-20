@@ -1,26 +1,33 @@
 # A long-running research agent with Restate + Tavily + LangChain
 
-This repo builds, in three steps, the kind of agent that's usually a pain:
-**a multi-agent research workflow that scans the news every morning, asks you
-on Slack whether to dig deeper, waits up to 24 hours for your answer, then
-fans out a planner + parallel researchers + writer and delivers the report —
-all driven by a single durable handler with no cron, no queue, and no
-session store.**
+🌐 [restate.dev](https://restate.dev) &nbsp;·&nbsp; 📚 [docs.restate.dev](https://docs.restate.dev) &nbsp;·&nbsp; 🤖 [AI agent guides](https://docs.restate.dev/ai) &nbsp;·&nbsp; 📦 [More AI examples](https://github.com/restatedev/ai-examples) &nbsp;·&nbsp; 💬 [Discord](https://discord.gg/skW3AZ6uGd)
 
-The agent layer is LangChain (`create_agent` + `RestateMiddleware()`); the
-web tools are Tavily (`web_search`, `extract_urls`, `crawl_site`); Restate
-makes every LLM call and every tool call durable, makes the orchestrator
-suspend for hours without burning compute, and self-schedules tomorrow's
-run.
+---
 
-The code lives in `app/`. We get there in three phases, each adding one
-Restate primitive on top of the previous one:
+**Build a research agent that runs for days.** A daily loop that:
+
+- 🔍 scans the news on a topic every morning
+- 💬 asks you on Slack which story to dive deeper into
+- ⏸️ sleeps for up to 24h waiting for your reply (with no compute held)
+- 🚀 fans out a planner + parallel researchers + writer
+- 📨 posts the final report to Slack
+- 🔁 self-schedules tomorrow's run
+
+All driven by **one durable handler**. No cron, no queue, no session store.
+
+**The stack:**
+
+- **[Restate](https://restate.dev)** — makes every LLM call and tool call durable; suspends handlers for hours without holding compute; fan-out, retries, self-scheduling
+- **[LangChain](https://python.langchain.com/)** — `create_agent` for the agent loop, `RestateMiddleware()` to journal every LLM response
+- **[Tavily](https://tavily.com)** — `web_search`, `extract_urls`, `crawl_site` for the web tools
+
+The canonical code lives in **`app/`**. We get there in three phases — each adds **one** Restate primitive on top of the previous one:
 
 | Phase | Service | What's new |
 |---|---|---|
-| 1 — resilient | `ResilientResearchAgent` | A LangChain agent inside a Restate handler. Every LLM call and every tool call is journaled. Parallel tool calls fan out via `restate.gather`. |
-| 2 — session | `StatefulResearchAgent` | A Virtual Object keyed by user. Conversation history persisted in `ctx.get`/`ctx.set`. Concurrent calls on the same key serialize automatically. |
-| 3 — deep research | `NewsResearchAgent` + 4 sub-agents | Autonomous daily loop (`ctx.service_send(..., send_delay=days=1)`). Human-in-the-loop deep-dive via `ctx.awakeable` + `restate.select` with a 24h timeout. Planner → N parallel `ResearchAgent`s via `restate.gather` → `WriterAgent`. Slack-delivered. |
+| 1 — resilient | `ResilientResearchAgent` | Durable LangChain agent. Every LLM + tool call is journaled. Parallel tool calls fan out via `restate.gather`. |
+| 2 — session | `StatefulResearchAgent` | Virtual Object keyed by user. Conversation history in `ctx.get`/`ctx.set`. Concurrent calls per key serialize automatically. |
+| 3 — autonomous | `NewsResearchAgent` + 4 sub-agents | Daily self-scheduled loop. Slack human-in-the-loop via `ctx.awakeable` + 24h `restate.select` timeout. Planner → N parallel researchers → writer. |
 
 ## Phase 1 — `ResilientResearchAgent`: exactly-once LLM + tool execution
 
@@ -56,8 +63,8 @@ What you get:
   journal by the middleware. Every Tavily call is recorded by
   `restate_context().run_typed(...)`. On replay, completed steps return
   their journaled result instead of re-executing.
-- **Exactly-once external calls.** Paid LLM + Tavily calls run at most once
-  per logical step, even across process crashes.
+- **Exactly-once external calls.** Paid LLM + Tavily calls do not re-execute 
+  on retries of subsequent steps.
 - **Parallel tool calls stay deterministic.** When the LLM emits N tool
   calls in one turn, Restate journals their outcomes so the agent loop
   replays in a consistent order.
@@ -98,10 +105,10 @@ the prior turn is still in context.
 
 ## Phase 3 — `NewsResearchAgent`: long-running, multi-agent, human-in-the-loop
 
-The full thing. A daily loop that scans the news, posts to Slack, waits up
+An autonomous research agent. A daily loop scans the news, posts to Slack, waits up
 to 24 hours for the user to request a deep dive, then fans out to parallel
-research agents and synthesizes a report. The kind of workflow that would
-otherwise need a queue + scheduler + session store + polling worker.
+research agents and synthesizes a report. To make this work without Restate, you would
+need a queue + scheduler + session store + polling worker.
 
 ```python
 @agent.handler()
@@ -196,8 +203,17 @@ to run at a time.
 uv sync
 export OPENAI_API_KEY=sk-...
 export TAVILY_API_KEY=tvly-...           # https://app.tavily.com
-export SLACK_BOT_TOKEN=xoxb-...          # phase 3 only — needs chat:write scope
-export SLACK_DIGEST_CHANNEL_ID=C...      # phase 3 only — invite the bot to the channel
+export SLACK_BOT_TOKEN=xoxb-...          # phase 3 only, OPTIONAL — needs chat:write scope
+export SLACK_DIGEST_CHANNEL_ID=C...      # phase 3 only, OPTIONAL — invite the bot to the channel
+```
+
+If `SLACK_BOT_TOKEN` or `SLACK_DIGEST_CHANNEL_ID` is unset, phase 3 prints
+the digest and the final report to the service's stdout instead of posting
+to Slack. The awakeable curl is still printed, so you can resolve the
+deep-dive prompt the same way:
+
+```
+curl http://localhost:8080/restate/awakeables/<awk_id>/resolve --json '"..."'
 ```
 
 ## Run
@@ -205,8 +221,10 @@ export SLACK_DIGEST_CHANNEL_ID=C...      # phase 3 only — invite the bot to th
 Restate server in one terminal:
 
 ```bash
-docker run --rm -p 8080:8080 -p 9070:9070 \
-  docker.restate.dev/restatedev/restate:latest
+docker run --name restate_dev --rm \
+-p 8080:8080 -p 9070:9070 -p 9071:9071 \
+--add-host=host.docker.internal:host-gateway \
+docker.restate.dev/restatedev/restate:latest
 ```
 
 Pick an implementation and run it in another terminal:

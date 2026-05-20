@@ -18,14 +18,14 @@ from datetime import timedelta
 
 import restate
 
-from app.utils.schemas import (
+from utils.schemas import (
     DailyResult,
     FinalReport,
     NewsDigest,
     ResearchPlan,
     SubReport,
 )
-from app.utils.tools import (
+from utils.tools import (
     post_news,
     post_report,
     run_agent,
