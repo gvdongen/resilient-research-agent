@@ -1,0 +1,18 @@
+[project]
+name = "social-agent"
+version = "0.1.0"
+description = "Restate × LiteLLM research agent — progressive tiers for a talk"
+requires-python = ">=3.11"
+dependencies = [
+    "restate-sdk>=0.18.0",
+    "litellm>=1.50",
+    "tavily-python",
+    "langchain-tavily",
+    "langchain-openai",
+    "slack-sdk",
+    "hypercorn",
+    "numpydoc",
+]
+
+[tool.uv]
+package = false
