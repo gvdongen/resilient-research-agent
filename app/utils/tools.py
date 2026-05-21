@@ -1,7 +1,44 @@
+"""Slack delivery + prompt formatters. Each phase defines its own Tavily
+@tool functions locally so the phase files stay readable on their own."""
+
 import logging
 import os
+from typing import Literal
+
+from tavily import TavilyClient
+from restate.ext.langchain._state import _State as _LCState, _state_var
 from slack_sdk import WebClient
+
 from .schemas import NewsDigest, ResearchPlan, SubReport, FinalReport
+
+Range = Literal["day", "week", "month", "year"]
+
+# ----------- Tavily Tools ---------------------
+
+tavily_client = TavilyClient()
+
+
+def tavily_search(query: str, range: Range) -> dict:
+    return {
+        "query": query,
+        "result": tavily_client.search(
+            query=query, time_range=range, search_depth="advanced"
+        ),
+    }
+
+
+def tavily_extract(urls: list[str]) -> dict:
+    return tavily_client.extract(urls=urls, extract_depth="advanced")
+
+
+def tavily_crawl(url: str, instructions: str = "") -> dict:
+    return {
+        "url": url,
+        "result": tavily_client.crawl(url=url, instructions=instructions),
+    }
+
+
+# ---- Middleware state isolation ---------------------------------------------
 
 logger = logging.getLogger("deep_research")
 logger.setLevel(logging.INFO)
@@ -17,10 +54,10 @@ def _slack() -> tuple[WebClient, str] | None:
         return None
     return WebClient(token=token), channel
 
+
 def summarize(topic: str, news: NewsDigest) -> str:
     news_lines = "\n".join(
-        f"- {it.headline}: {it.summary} ({it.url})"
-        for it in news.items
+        f"- {it.headline}: {it.summary} ({it.url})" for it in news.items
     )
     return (
         f"Topic: {topic}\n\n"
@@ -41,39 +78,44 @@ def to_brief(topic: str, plan: ResearchPlan, sub_reports: list[SubReport]) -> st
         )
     )
 
+
 def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
     """Post today's news + curl to trigger the deep-dive. Returns ts."""
     resolve_url = f"http://localhost:8080/restate/awakeables/{awk_id}/resolve"
     yes_cmd = f"curl {resolve_url} --json '\"Tell me more about the second story\"'"
 
     items_md = "\n\n".join(
-        f"*{i.headline}*\n{i.summary}\n<{i.url}>"
-        for i in digest.items
+        f"*{i.headline}*\n{i.summary}\n<{i.url}>" for i in digest.items
     )
 
     slack = _slack()
     if slack is None:
         logger.info(
             "\n=== Today's news: %s ===\n%s\n\n%s\n\n▶ Want to dive deeper?\n%s\n",
-            topic, digest.overview, items_md, yes_cmd,
+            topic,
+            digest.overview,
+            items_md,
+            yes_cmd,
         )
         return "log:news"
 
     client, channel = slack
     blocks: list[dict] = [
-        {"type": "header",
-         "text": {"type": "plain_text", "text": f"Today's news: {topic}"}},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"_{digest.overview}_"}},
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Today's news: {topic}"},
+        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"_{digest.overview}_"}},
         {"type": "divider"},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": items_md}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": items_md}},
         {"type": "divider"},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": (
-             "▶ *Want to dive deeper?*\n\n"
-             f"```{yes_cmd}```\n\n"
-         )}},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": ("▶ *Want to dive deeper?*\n\n" f"```{yes_cmd}```\n\n"),
+            },
+        },
     ]
     resp = client.chat_postMessage(
         channel=channel,
@@ -91,33 +133,48 @@ def post_report(topic: str, report: FinalReport) -> str:
         sources = "\n".join(f"• {s}" for s in report.sources)
         logger.info(
             "\n=== Deep research: %s ===\n# %s\n\n%s\n\n%s\n\nSources:\n%s\n",
-            topic, report.headline, report.executive_summary, sections, sources,
+            topic,
+            report.headline,
+            report.executive_summary,
+            sections,
+            sources,
         )
         return "log:report"
 
     client, channel = slack
     blocks: list[dict] = [
-        {"type": "header",
-         "text": {"type": "plain_text", "text": f"Deep research: {topic}"}},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"*{report.headline}*"}},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": report.executive_summary}},
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Deep research: {topic}"},
+        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{report.headline}*"}},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": report.executive_summary},
+        },
         {"type": "divider"},
     ]
     for sec in report.sections:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": f"*{sec.heading}*\n{sec.body}"},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{sec.heading}*\n{sec.body}"},
+            }
+        )
     if report.sources:
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn",
-                          "text": "Sources:\n" + "\n".join(f"• <{s}>" for s in report.sources)}],
-        })
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Sources:\n"
+                        + "\n".join(f"• <{s}>" for s in report.sources),
+                    }
+                ],
+            }
+        )
 
     resp = client.chat_postMessage(
         channel=channel,

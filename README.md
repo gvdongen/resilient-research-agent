@@ -21,15 +21,16 @@ All driven by **one durable handler**. No cron, no queue, no session store.
 - **[LangChain](https://python.langchain.com/)** — `create_agent` for the agent loop, `RestateMiddleware()` to journal every LLM response
 - **[Tavily](https://tavily.com)** — `web_search`, `extract_urls`, `crawl_site` for the web tools
 
-The canonical code lives in **`app/`**. We get there in three phases — each adds **one** Restate primitive on top of the previous one:
+The canonical code lives in **`app/`** — one file per phase, each fully
+self-contained (own tools, own agent, no cross-phase imports):
 
-| Phase | Service | What's new |
-|---|---|---|
-| 1 — resilient | `ResilientResearchAgent` | Durable LangChain agent. Every LLM + tool call is journaled. Parallel tool calls fan out via `restate.gather`. |
-| 2 — session | `StatefulResearchAgent` | Virtual Object keyed by user. Conversation history in `ctx.get`/`ctx.set`. Concurrent calls per key serialize automatically. |
-| 3 — autonomous | `NewsResearchAgent` + 4 sub-agents | Daily self-scheduled loop. Slack human-in-the-loop via `ctx.awakeable` + 24h `restate.select` timeout. Planner → N parallel researchers → writer. |
+| Phase          | File | Service                            | What's new                                                                                                                                        |
+|----------------|---|------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| a — one-shot   | `a_researcher.py` | `SimpleResearchAgent`              | Durable one-shot LangChain agent. Every LLM + tool call is journaled. Parallel tool calls fan out via `restate.gather`.                           |
+| b — session    | `b_research_session.py` | `ResearchSession`                  | Virtual Object keyed by session id. Conversation history in `ctx.get`/`ctx.set`. Concurrent calls per key serialize automatically.                |
+| c — autonomous | `c_deep_research.py` | `DeepResearchAgent` + 4 sub-agents | Daily self-scheduled loop. Slack human-in-the-loop via `ctx.awakeable` + 24h `restate.select` timeout. Planner → N parallel researchers → writer. |
 
-## Phase 1 — `ResilientResearchAgent`: exactly-once LLM + tool execution
+## Phase 1 — `SimpleResearchAgent`: exactly-once LLM + tool execution
 
 The simplest version. A LangChain `create_agent(...)` with the three Tavily
 tools, wrapped in a Restate service handler. The middleware journals every
@@ -45,7 +46,7 @@ agent = create_agent(
     middleware=[RestateMiddleware()],
 )
 
-resilient = restate.Service("ResilientResearchAgent")
+resilient = restate.Service("SimpleResearchAgent")
 
 @resilient.handler()
 async def search(_ctx: restate.Context, query: str) -> Research:
@@ -72,22 +73,25 @@ What you get:
 Demo: `kill -9` the Python process mid-search. Restart it. The same
 invocation resumes from the last journaled step and finishes the request.
 
-## Phase 2 — `StatefulResearchAgent`: durable conversations, no race conditions
+## Phase 2 — `ResearchSession`: durable chat session, no race conditions
 
-Phase 1's agent, now inside a Virtual Object keyed by user id. Without
-Restate you'd need a session store (Redis, Postgres) and a lock per user to
-prevent two follow-ups from racing on the same conversation history.
+The same research agent, now inside a Virtual Object keyed by session id.
+Multi-turn chat with persistent history. Without Restate you'd need a
+session store (Redis, Postgres) and a lock per session to prevent two
+follow-ups from racing on the same conversation log.
 
 ```python
-agent = restate.VirtualObject("StatefulResearchAgent")
+agent = restate.VirtualObject("ResearchSession")
 
 @agent.handler()
-async def ask(ctx: restate.ObjectContext, query: str) -> Research:
-    history = await ctx.get("messages") or []
-    history.append({"role": "user", "content": query})
-    result = await research_agent.ainvoke({"messages": history})
-    ctx.set("messages", result["messages"])
-    return result["structured_response"]
+async def chat(ctx: restate.ObjectContext, query: str) -> str:
+    history = await ctx.get("messages", type_hint=ChatHistory) or ChatHistory()
+    history.messages.append(HumanMessage(content=query))
+
+    result = await chat_researcher.ainvoke({"messages": history.messages})
+
+    ctx.set("messages", ChatHistory(messages=result["messages"]))
+    return result["messages"][-1].content
 ```
 
 What you get:
@@ -95,15 +99,17 @@ What you get:
 - **Per-key state in Restate's KV.** `ctx.get("messages")` / `ctx.set(...)`
   persists the chat history. No external DB.
 - **Single-writer per key.** Concurrent calls to
-  `StatefulResearchAgent/giselle/ask` serialize automatically — the second
+  `ResearchSession/giselle/chat` serialize automatically — the second
   call waits for the first to finish.
 - **State survives crashes.** Restart the process, follow up days later,
   the assistant still remembers earlier turns.
+- **Read-only inspector.** `get_history` is a shared handler — call it any
+  time to see what the session has said.
 
-Demo: ask a follow-up after restarting the server — the second source from
-the prior turn is still in context.
+Demo: ask a follow-up after restarting the server — the agent still
+remembers what you discussed before.
 
-## Phase 3 — `NewsResearchAgent`: long-running, multi-agent, human-in-the-loop
+## Phase 3 — `DeepResearchAgent`: long-running, multi-agent, human-in-the-loop
 
 An autonomous research agent. A daily loop scans the news, posts to Slack, waits up
 to 24 hours for the user to request a deep dive, then fans out to parallel
@@ -157,7 +163,7 @@ What you get:
   needed.
 - **Multi-agent isolation.** Five separate services
   (`NewsScoutAgent`, `PlannerAgent`, `ResearchAgent`, `WriterAgent`,
-  `NewsResearchAgent`) each get their own invocations, journals, retry
+  `DeepResearchAgent`) each get their own invocations, journals, retry
   policies, and traces in the Restate UI.
 
 Demo: trigger the run, then in the Restate UI watch the orchestrator
@@ -170,8 +176,10 @@ done, only the in-flight one replays.
 
 LangChain isn't required. Restate's durability primitives work with any LLM
 client. If you want full control over the loop, the same three phases live
-in **`app_litellm/`** — identical service names and payloads, but the agent
-loop is hand-written against `litellm.acompletion`:
+in **`app_litellm/`** with the same file layout (`a_researcher.py`,
+`b_research_session.py`, `c_deep_research.py`) — identical service names
+and payloads, but the agent loop is hand-written against
+`litellm.acompletion`:
 
 ```python
 while True:
@@ -225,10 +233,10 @@ Pick an implementation and run it in another terminal:
 
 ```bash
 # Canonical LangChain version
-cd app && uv run python app/app.py
+uv run app
 
 # — or — manual litellm loop
-cd app_litellm && uv run python app_litellm/app.py
+uv run app_litellm
 ```
 
 Register with Restate. Go to the UI at `localhost:9070` and register the service deployment at `http://host.docker.internal:9080`.
@@ -241,18 +249,20 @@ The UI then shows all the services that were registered:
 
 ```bash
 # Phase 1 — stateless single research query
-curl localhost:8080/ResilientResearchAgent/search \
+curl localhost:8080/SimpleResearchAgent/search \
   --json '"What changed in Postgres 17 logical replication?"'
 
-# Phase 2 — conversation keyed by user
-curl localhost:8080/StatefulResearchAgent/session123/ask \
+# Phase 2 — chat session with memory per session id
+curl localhost:8080/ResearchSession/session123/chat \
   --json '"Summarize recent advances in durable execution."'
 
-curl localhost:8080/StatefulResearchAgent/session123/ask \
+curl localhost:8080/ResearchSession/session123/chat \
   --json '"Tell me more about the second source."'
 
+curl localhost:8080/ResearchSession/session123/get_history    # inspect
+
 # Phase 3 — autonomous daily news+deep-research loop on a topic
-curl localhost:8080/NewsResearchAgent/run --json '"durable execution"'
+curl localhost:8080/DeepResearchAgent/run --json '"durable execution"'
 ```
 
 To dive deeper on a digest, copy the curl from the Slack message — it

@@ -1,9 +1,21 @@
-"""Shared pydantic models for the deep-research pipeline."""
+"""Shared pydantic models for all three phases."""
 
 from pydantic import BaseModel, ConfigDict
 
+# ---- Phase 1 ---------------------------------------------------------------
+
+
+class Research(BaseModel):
+    """Output of Phase 1's `SimpleResearchAgent.search`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    sources: list[str]
+
 
 # ---- News scout -------------------------------------------------------------
+
 
 class NewsItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -15,6 +27,7 @@ class NewsItem(BaseModel):
 
 class NewsDigest(BaseModel):
     """Output of NewsScoutAgent: today's news on the topic."""
+
     model_config = ConfigDict(extra="forbid")
 
     overview: str
@@ -23,8 +36,10 @@ class NewsDigest(BaseModel):
 
 # ---- Planner ----------------------------------------------------------------
 
+
 class PlanRequest(BaseModel):
     """Input to PlannerAgent.plan — topic plus today's news for context."""
+
     model_config = ConfigDict(extra="forbid")
 
     topic: str
@@ -33,6 +48,7 @@ class PlanRequest(BaseModel):
 
 class ResearchPlan(BaseModel):
     """Output of PlannerAgent: angle + subtopics for parallel research."""
+
     model_config = ConfigDict(extra="forbid")
 
     rationale: str
@@ -41,8 +57,10 @@ class ResearchPlan(BaseModel):
 
 # ---- Researchers ------------------------------------------------------------
 
+
 class SubReport(BaseModel):
     """One researcher's findings for a single subtopic."""
+
     model_config = ConfigDict(extra="forbid")
 
     subtopic: str
@@ -51,6 +69,7 @@ class SubReport(BaseModel):
 
 
 # ---- Writer -----------------------------------------------------------------
+
 
 class Section(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -61,6 +80,7 @@ class Section(BaseModel):
 
 class FinalReport(BaseModel):
     """Output of the ReportWriter."""
+
     model_config = ConfigDict(extra="forbid")
 
     headline: str
@@ -79,9 +99,20 @@ class WriteRequest(BaseModel):
 
 # ---- Orchestrator return ----------------------------------------------------
 
+
 class DailyResult(BaseModel):
     """What the orchestrator returns each day: always the news, optionally a deep report."""
+
     model_config = ConfigDict(extra="forbid")
 
     news: NewsDigest
     report: FinalReport | None = None
+
+
+class ResearchRequest(BaseModel):
+    """A deep-dive topic from the daily news digest that needs further research."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    topic: str
+    news: NewsDigest

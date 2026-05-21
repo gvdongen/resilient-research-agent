@@ -1,64 +1,68 @@
-"""DeepResearchAgent — autonomous daily loop, LangChain edition.
+"""Phase 3 — Autonomous daily deep-research loop.
 
-Each day:
+`DeepResearchAgent.run(topic)`:
   1. NewsScoutAgent scans the news on a topic and writes a digest.
   2. Post the digest to Slack with a curl to resolve an awakeable to request
      a deep dive on a news topic. The orchestrator suspends on `restate.select`
      until the awakeable fires or a 24h timeout elapses.
   3. If a deep-dive topic arrives →
-     PlannerAgent → N parallel ResearcherAgents → WriterAgent
+     PlannerAgent → N parallel ResearchAgents → WriterAgent
      and then the FinalReport is posted to Slack.
   4. Self-schedule tomorrow's run via `ctx.service_send(..., send_delay=days=1)`.
+
+This file is fully self-contained: it defines its own Tavily tools and its
+own researcher agent (independent from Phase 1).
 """
 
 from datetime import timedelta
-from typing import Literal
-
 import restate
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
-from restate.ext.langchain import RestateMiddleware
-from utils.schemas import *
-from utils.tools import summarize, to_brief, post_news, post_report
 from langchain_core.tools import tool
-from restate.ext.langchain import restate_context
-from tavily import TavilyClient
-
-Range = Literal["day", "week", "month", "year"]
-
+from restate.ext.langchain import RestateMiddleware, restate_context
+from utils.schemas import *
+from utils.tools import (
+    post_news,
+    post_report,
+    summarize,
+    to_brief,
+)
+from utils.tools import tavily_search, tavily_extract, tavily_crawl, Range
 
 # ----------- Tools ---------------------
 
-tavily_client = TavilyClient()
-
 
 @tool
-async def web_search(query: str, time_range: Range = "month") -> dict:
-    """Search the web via Tavily. time_range is one of: day, week, month, year."""
-    def _search() -> dict:
-        return tavily_client.search(
-            query=query, time_range=time_range, search_depth="advanced", topic="general"
+async def web_search(queries: list[str], time_range: Range = "month") -> list[dict]:
+    """Search the web with a list of queries. time_range is one of: day, week, month, year."""
+    searches = [
+        restate_context().run_typed(
+            f"web_search:{query}", tavily_search, query=query, range=time_range
         )
-    return await restate_context().run_typed(f"web_search:{query}", _search)
+        for query in queries
+    ]
+    await restate.gather(*searches)
+    return [await result for result in searches]
 
 
 @tool
 async def extract_urls(urls: list[str]) -> dict:
     """Return the full readable text of a list of web pages."""
-    def _extract() -> dict:
-        return tavily_client.extract(urls=urls, extract_depth="advanced")
-    return await restate_context().run_typed("extract_urls", _extract)
+    return await restate_context().run_typed("extract_urls", tavily_extract, urls=urls)
 
 
 @tool
-async def crawl_site(url: str, instructions: str = "") -> dict:
+async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
     """Crawl a website (guided by natural-language instructions) and return content from up to 10 pages."""
-    def _crawl() -> dict:
-        return tavily_client.crawl(url=url, instructions=instructions)
-    return await restate_context().run_typed(f"crawl_site:{url}", _crawl)
+    crawls = [
+        restate_context().run_typed(f"crawl_site:{url}", tavily_crawl, url=url, instructions=instructions)
+        for url in urls
+    ]
+    await restate.gather(*crawls)
+    return [await result for result in crawls]
 
 
-# ----------- Agents ---------------------
+# ----------- Stage agents ---------------------
 
 news_scout = create_agent(
     model=init_chat_model("openai:gpt-5"),
@@ -66,9 +70,9 @@ news_scout = create_agent(
     system_prompt="""You are a news scout. Given a topic, use `web_search` with
     `time_range='day'` to find what's new in the last 24 hours. If a
     story looks important or unclear, follow up with `extract_urls` to
-    read it in full. Return a NewsDigest: a one-paragraph overview plus
-    3-8 distinct news items (headline, 1-2 sentence summary, source URL).
-    Skip anything you already covered earlier.""",
+    read it in full. Keep the loop tight — at most 3 rounds of tool calls.
+    Return a NewsDigest: a one-paragraph overview plus 3-8 distinct news
+    items (headline, 1-2 sentence summary, source URL).""",
     response_format=NewsDigest,
     middleware=[RestateMiddleware()],
 )
@@ -88,12 +92,13 @@ planner = create_agent(
 
 researcher = create_agent(
     model=init_chat_model("openai:gpt-5"),
-    tools=[web_search, extract_urls, crawl_site],
+    tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a focused research analyst. You have web_search, extract_urls,
     and crawl_site available. Investigate the assigned subtopic thoroughly:
     search with recency-appropriate time_range, then read the most
-    promising sources in full. Cite every claim with a URL. Stop as soon as
-    you have enough to write a tight 200-400 word findings section.""",
+    promising sources in full. Keep the loop tight — at most 3 rounds of
+    tool calls. Cite every claim with a URL. Stop as soon as you have
+    enough to write a tight 200-400 word findings section.""",
     response_format=SubReport,
     middleware=[RestateMiddleware()],
 )
@@ -110,7 +115,8 @@ writer = create_agent(
     middleware=[RestateMiddleware()],
 )
 
-# ----------- Agent services ---------------------
+
+# ----------- Stage services ---------------------
 
 news_scout_agent = restate.Service("NewsScoutAgent")
 
@@ -148,9 +154,9 @@ async def write(_ctx: restate.Context, brief: str) -> FinalReport:
     return result["structured_response"]
 
 
-# ----------- Orchestration ---------------------
+# ----------- Orchestrator ---------------------
 
-agent = restate.Service("NewsResearchAgent")
+agent = restate.Service("DeepResearchAgent")
 
 
 @agent.handler()
@@ -161,37 +167,41 @@ async def run(ctx: restate.Context, topic: str) -> DailyResult:
     # Stage 1 — daily news scan
     news = await ctx.service_call(scan, arg=topic)
 
-    # Stage 2 — send news digest to Slack, ask for a deep-dive topic
+    # Stage 2 — send digest to Slack, ask for a deep-dive topic via awakeable
     awk_id, decision_promise = ctx.awakeable(type_hint=str)
-    await ctx.run_typed("slack-news-update", post_news, topic=topic, digest=news, awk_id=awk_id)
+    await ctx.run_typed(
+        "slack-news-update", post_news, topic=topic, digest=news, awk_id=awk_id
+    )
 
+    # Stage 3 — suspend up to 24h waiting for the user's reply
     match await restate.select(
         decision=decision_promise,
         timeout=ctx.sleep(timedelta(days=1)),
     ):
-        case ["decision", answer]:
-            return await ctx.service_call(deep_research, arg=ResearchRequest(topic=answer, news=news))
+        case ["decision", deep_dive_topic]:
+            pass
         case _:
             return DailyResult(news=news)
 
+    # Stage 4 — plan
+    research_plan = await ctx.service_call(
+        plan, arg=ResearchRequest(topic=deep_dive_topic, news=news)
+    )
 
-
-@agent.handler()
-async def deep_research(ctx: restate.Context, req: ResearchRequest) -> DailyResult:
-    # Stage 1 — plan
-    research_plan = await ctx.service_call(plan, arg=req)
-
-    # Stage 2 — fan out one Researcher per subtopic, in parallel
+    # Stage 5 — fan out one ResearchAgent per subtopic, in parallel
     handles = [
-        ctx.service_call(investigate, arg=subtopic)
-        for subtopic in research_plan.subtopics
+        ctx.service_call(investigate, arg=sub) for sub in research_plan.subtopics
     ]
     await restate.gather(*handles)
     sub_reports = [await h for h in handles]
 
-    # Stage 3 — synthesize the final report
-    report = await ctx.service_call(write, arg=to_brief(req.topic, research_plan, sub_reports))
+    # Stage 6 — synthesize the final report
+    report = await ctx.service_call(
+        write, arg=to_brief(deep_dive_topic, research_plan, sub_reports)
+    )
 
-    # Stage 4 — deliver the report
-    await ctx.run_typed("slack-topic-report", post_report, topic=req.topic, report=report)
-    return DailyResult(news=req.news, report=report)
+    # Stage 7 — deliver the report
+    await ctx.run_typed(
+        "slack-topic-report", post_report, topic=deep_dive_topic, report=report
+    )
+    return DailyResult(news=news, report=report)
