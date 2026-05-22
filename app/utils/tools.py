@@ -5,13 +5,14 @@ import logging
 import os
 from typing import Literal
 
-from langchain_core.messages import ToolMessage
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 
 from .schemas import NewsDigest, ResearchPlan, SubReport, FinalReport
 
 Range = Literal["day", "week", "month", "year"]
+
+RESTATE_HOST = os.environ.get("RESTATE_CLOUD_INGRESS") or "http://localhost:8080"
 
 # ----------- Tavily Tools ---------------------
 
@@ -87,8 +88,9 @@ def to_brief(topic: str, plan: ResearchPlan, sub_reports: list[SubReport]) -> st
 
 def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
     """Post today's news + curl to trigger the deep-dive. Returns ts."""
-    resolve_url = f"http://localhost:8080/restate/awakeables/{awk_id}/resolve"
-    yes_cmd = f"curl {resolve_url} --json '\"Tell me more about the first story\"'"
+    resolve_url = f"{RESTATE_HOST}/restate/awakeables/{awk_id}/resolve"
+    auth_header = "" if "localhost" in RESTATE_HOST else "-H \"Authorization: Bearer $RESTATE_AUTH_TOKEN\""
+    yes_cmd = f"curl {resolve_url} {auth_header} --json '\"Tell me more about the first story\"'"
 
     items_md = "\n\n".join(
         f"*{i.headline}*\n{i.summary}\n<{i.url}>" for i in digest.items

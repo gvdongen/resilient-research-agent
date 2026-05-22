@@ -1,5 +1,5 @@
 """Shared pydantic models for all three phases."""
-
+from langchain_core.messages import AnyMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 # ---- Phase 1 ---------------------------------------------------------------
