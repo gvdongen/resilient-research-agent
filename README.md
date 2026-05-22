@@ -30,7 +30,7 @@ self-contained (own tools, own agent, no cross-phase imports):
 | b — session    | `b_research_session.py` | `ResearchSession`                  | Virtual Object keyed by session id. Conversation history in `ctx.get`/`ctx.set`. Concurrent calls per key serialize automatically.                |
 | c — autonomous | `c_deep_research.py` | `DeepResearchAgent` + 4 sub-agents | Daily self-scheduled loop. Slack human-in-the-loop via `ctx.awakeable` + 24h `restate.select` timeout. Planner → N parallel researchers → writer. |
 
-## Phase 1 — `SimpleResearchAgent`: exactly-once LLM + tool execution
+## Phase 1 — `SimpleResearchAgent`: durable agent 
 
 The simplest version. A LangChain `create_agent(...)` with the three Tavily
 tools, wrapped in a Restate service handler. The middleware journals every
@@ -39,7 +39,7 @@ LLM response; each tool wraps its Tavily call in
 
 ```python
 agent = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     tools=[web_search, extract_urls, crawl_site],
     system_prompt=SYSTEM_RESEARCH,
     response_format=Research,

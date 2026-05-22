@@ -9,6 +9,7 @@ dependencies = [
     "slack-sdk",
     "hypercorn",
     "restate-sdk[serde]>=0.18.1",
+    "numpydoc",
 ]
 
 [tool.uv]
