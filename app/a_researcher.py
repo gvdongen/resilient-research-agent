@@ -10,7 +10,6 @@ Stateless. One query in, one structured `Research` answer out.
 
 import restate
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from restate.ext.langchain import RestateMiddleware, restate_context
 from utils.schemas import Research
@@ -52,7 +51,7 @@ async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
 # ----------- Agent + Service ---------------------
 
 researcher = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a research assistant. Use web_search, extract_urls,
     and crawl_sites to investigate the user's question. Keep the loop tight —

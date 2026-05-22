@@ -73,6 +73,8 @@ What you get:
 Demo: `kill -9` the Python process mid-search. Restart it. The same
 invocation resumes from the last journaled step and finishes the request.
 
+![overview](./docs/img/phase-1.png)
+
 ## Phase 2 — `ResearchSession`: durable chat session, no race conditions
 
 The same research agent, now inside a Virtual Object keyed by session id.
@@ -108,6 +110,8 @@ What you get:
 
 Demo: ask a follow-up after restarting the server — the agent still
 remembers what you discussed before.
+
+![overview](./docs/img/phase-2.png)
 
 ## Phase 3 — `DeepResearchAgent`: long-running, multi-agent, human-in-the-loop
 
@@ -172,6 +176,8 @@ Paste the Slack curl, watch the planner → N researchers → writer pipeline
 light up. Kill the process during fan-out — the completed researchers stay
 done, only the in-flight one replays.
 
+![overview](./docs/img/phase-3.png)
+
 ## Phase 4 (optional) — roll your own agent loop
 
 LangChain isn't required. Restate's durability primitives work with any LLM
@@ -202,9 +208,6 @@ flavor if you want to swap providers per call, customize the loop, or just
 prefer no framework. Swap `litellm` for the OpenAI SDK, Anthropic SDK, or
 anything else — the durability story is unchanged.
 
-`app/` and `app_litellm/` register identical service names, so pick **one**
-to run at a time.
-
 ## Setup
 
 ```bash
@@ -233,10 +236,10 @@ Pick an implementation and run it in another terminal:
 
 ```bash
 # Canonical LangChain version
-uv run app
+cd app && uv run .
 
 # — or — manual litellm loop
-uv run app_litellm
+cd app_litellm && uv run .
 ```
 
 Register with Restate. Go to the UI at `localhost:9070` and register the service deployment at `http://host.docker.internal:9080`.

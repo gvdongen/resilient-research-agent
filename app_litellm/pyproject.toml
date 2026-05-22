@@ -1,0 +1,15 @@
+[project]
+name = "app-litellm"
+version = "0.1.0"
+description = "Restate × LiteLLM research agent (hand-rolled tool-call loop)."
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.50",
+    "tavily-python",
+    "slack-sdk",
+    "hypercorn",
+    "restate-sdk[serde]>=0.18.1",
+]
+
+[tool.uv]
+package = false

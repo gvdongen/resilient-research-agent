@@ -5,8 +5,8 @@ import logging
 import os
 from typing import Literal
 
-from tavily import TavilyClient
-from restate.ext.langchain._state import _State as _LCState, _state_var
+from langchain_core.messages import ToolMessage
+from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 
 from .schemas import NewsDigest, ResearchPlan, SubReport, FinalReport
@@ -19,23 +19,29 @@ tavily_client = TavilyClient()
 
 
 def tavily_search(query: str, range: Range) -> dict:
-    return {
-        "query": query,
-        "result": tavily_client.search(
-            query=query, time_range=range, search_depth="advanced"
-        ),
-    }
+    try:
+        result = tavily_client.search(query=query, time_range=range, search_depth="advanced")
+    except BadRequestError as e:
+        # Non-transient: malformed request so propagate back to LLM
+        result = f"BadRequestError: {str(e)}\n\nTry a different query."
+    return {"query": query, "result": result}
 
 
 def tavily_extract(urls: list[str]) -> dict:
-    return tavily_client.extract(urls=urls, extract_depth="advanced")
+    try:
+        return tavily_client.extract(urls=urls, extract_depth="advanced")
+    except BadRequestError as e:
+        # Non-transient: malformed request so propagate back to LLM
+        return {"result": f"BadRequestError: {str(e)}\n\nTry a different query."}
 
 
 def tavily_crawl(url: str, instructions: str = "") -> dict:
-    return {
-        "url": url,
-        "result": tavily_client.crawl(url=url, instructions=instructions),
-    }
+    try:
+        result = tavily_client.crawl(url=url, instructions=instructions)
+    except BadRequestError as e:
+        # Non-transient: malformed request so propagate back to LLM
+        result = f"BadRequestError: {str(e)}\n\nTry a different query."
+    return {"url": url, "result": result}
 
 
 # ---- Middleware state isolation ---------------------------------------------
@@ -82,7 +88,7 @@ def to_brief(topic: str, plan: ResearchPlan, sub_reports: list[SubReport]) -> st
 def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
     """Post today's news + curl to trigger the deep-dive. Returns ts."""
     resolve_url = f"http://localhost:8080/restate/awakeables/{awk_id}/resolve"
-    yes_cmd = f"curl {resolve_url} --json '\"Tell me more about the second story\"'"
+    yes_cmd = f"curl {resolve_url} --json '\"Tell me more about the first story\"'"
 
     items_md = "\n\n".join(
         f"*{i.headline}*\n{i.summary}\n<{i.url}>" for i in digest.items

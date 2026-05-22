@@ -3,3 +3,7 @@
 .idea
 restate-data/
 **/__pycache__/
+app_adk
+app_openai
+app_pydantic_ai
+app/BLOG.md

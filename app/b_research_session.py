@@ -11,11 +11,10 @@ race conditions on the conversation log. State survives crashes.
 
 import restate
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
-from restate.ext.langchain import RestateMiddleware, restate_context
+from restate.ext.langchain import restate_context, RestateMiddleware
 from utils.tools import tavily_search, tavily_extract, tavily_crawl, Range
 
 # ----------- Tools ---------------------
@@ -54,7 +53,7 @@ async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
 # ----------- Agent + VO ---------------------
 
 chat_researcher = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a research assistant. Use web_search, extract_urls,
     and crawl_site to answer the user's questions. Keep the loop tight —

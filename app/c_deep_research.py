@@ -17,9 +17,11 @@ own researcher agent (independent from Phase 1).
 from datetime import timedelta
 import restate
 from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from restate.ext.langchain import RestateMiddleware, restate_context
+from utils.restate_chat_model import init_durable_model
 from utils.schemas import *
 from utils.tools import (
     post_news,
@@ -65,20 +67,20 @@ async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
 # ----------- Stage agents ---------------------
 
 news_scout = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     tools=[web_search, extract_urls],
     system_prompt="""You are a news scout. Given a topic, use `web_search` with
     `time_range='day'` to find what's new in the last 24 hours. If a
     story looks important or unclear, follow up with `extract_urls` to
     read it in full. Keep the loop tight — at most 3 rounds of tool calls.
-    Return a NewsDigest: a one-paragraph overview plus 3-8 distinct news
+    Return a NewsDigest: a one-paragraph overview plus 3-5 distinct, concise news
     items (headline, 1-2 sentence summary, source URL).""",
     response_format=NewsDigest,
     middleware=[RestateMiddleware()],
 )
 
 planner = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     system_prompt="""You are a senior research planner. Given a topic and a digest of
     today's news on it, produce a tight research plan: a short rationale
     (what's worth digging into and why) plus 3-5 sharply scoped subtopics.
@@ -91,20 +93,27 @@ planner = create_agent(
 )
 
 researcher = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a focused research analyst. You have web_search, extract_urls,
     and crawl_site available. Investigate the assigned subtopic thoroughly:
     search with recency-appropriate time_range, then read the most
     promising sources in full. Keep the loop tight — at most 3 rounds of
-    tool calls. Cite every claim with a URL. Stop as soon as you have
+    tool calls. Cite every claim swith a URL. Stop as soon as you have
     enough to write a tight 200-400 word findings section.""",
     response_format=SubReport,
-    middleware=[RestateMiddleware()],
+    middleware=[
+        RestateMiddleware(),
+        SummarizationMiddleware(
+            model=init_durable_model("gpt-5.4-mini"),
+            trigger=("tokens", 4000),
+            keep=("messages", 10),
+        ),
+    ],
 )
 
 writer = create_agent(
-    model=init_chat_model("openai:gpt-5"),
+    model="openai:gpt-5",
     system_prompt="""You are a senior editor turning raw research notes into a polished
     report. Take the topic, the plan's rationale, and the per-subtopic
     findings. Produce: a sharp headline, a 3-4 sentence executive summary,
@@ -112,7 +121,14 @@ writer = create_agent(
     and a de-duplicated list of source URLs. Cite inline where it adds
     credibility. Do not invent facts beyond what the findings contain.""",
     response_format=FinalReport,
-    middleware=[RestateMiddleware()],
+    middleware=[
+        RestateMiddleware(),
+        SummarizationMiddleware(
+            model=init_durable_model("gpt-5.4-mini"),
+            trigger=("tokens", 4000),
+            keep=("messages", 10),
+        ),
+    ],
 )
 
 

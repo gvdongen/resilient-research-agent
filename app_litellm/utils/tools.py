@@ -56,7 +56,7 @@ def _slack() -> tuple[WebClient, str] | None:
 def post_news(topic: str, digest: NewsDigest, awk_id: str) -> str:
     """Post today's news + curl to trigger the deep-dive. Returns ts."""
     resolve_url = f"http://localhost:8080/restate/awakeables/{awk_id}/resolve"
-    yes_cmd = f"curl {resolve_url} --json '\"Tell me more about ...\"'"
+    yes_cmd = f"curl {resolve_url} --json '\"Tell me more about the first story\"'"
 
     items_md = "\n\n".join(
         f"*{i.headline}*\n{i.summary}\n<{i.url}>" for i in digest.items
