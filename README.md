@@ -235,11 +235,10 @@ docker.restate.dev/restatedev/restate:latest
 Pick an implementation and run it in another terminal:
 
 ```bash
-# Canonical LangChain version
-cd app && uv run .
+uv run app
 
 # — or — manual litellm loop
-cd app_litellm && uv run .
+uv run app_litellm
 ```
 
 Register with Restate. Go to the UI at `localhost:9070` and register the service deployment at `http://host.docker.internal:9080`.

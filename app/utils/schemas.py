@@ -1,6 +1,6 @@
 """Shared pydantic models for all three phases."""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---- Phase 1 ---------------------------------------------------------------
 
@@ -12,6 +12,15 @@ class Research(BaseModel):
 
     summary: str
     sources: list[str]
+
+
+# ---- Phase 2 ---------------------------------------------------------------
+
+
+class ChatHistory(BaseModel):
+    """Persistent multi-turn chat history for one ResearchSession key."""
+
+    messages: list[AnyMessage] = Field(default_factory=list)
 
 
 # ---- News scout -------------------------------------------------------------
