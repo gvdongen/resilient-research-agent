@@ -249,11 +249,11 @@ The UI then shows all the services that were registered:
 ```bash
 # Phase 1 — stateless single research query
 curl localhost:8080/SimpleResearchAgent/search \
-  --json '"What changed in Postgres 17 logical replication?"'
+  --json '"What is new in AI?"'
 
 # Phase 2 — chat session with memory per session id
 curl localhost:8080/ResearchSession/session123/chat \
-  --json '"Summarize recent advances in durable execution."'
+  --json '"What is new in AI?"'
 
 curl localhost:8080/ResearchSession/session123/chat \
   --json '"Tell me more about the second source."'
@@ -261,7 +261,7 @@ curl localhost:8080/ResearchSession/session123/chat \
 curl localhost:8080/ResearchSession/session123/get_history    # inspect
 
 # Phase 3 — autonomous daily news+deep-research loop on a topic
-curl localhost:8080/DeepResearchAgent/run --json '"durable execution"'
+curl localhost:8080/DeepResearchAgent/run --json '"AI"'
 ```
 
 To dive deeper on a digest, copy the curl from the Slack message — it
@@ -335,19 +335,18 @@ All seven services show up in the Restate Cloud UI.
 
 ### 5. Invoke against Restate Cloud
 
+Go the Restate Cloud UI, click on the handler you want to invoke (e.g.
+`DeepResearchAgent/run`), and send a message like `"What is new in AI?"`.
+
 Same payloads as locally, just swap the ingress and add the auth header:
 
 ```bash
 export RESTATE_INGRESS=https://<env>.env.<region>.restate.cloud:8080
 export RESTATE_AUTH_TOKEN=<your-restate-api-key>
 
-curl $RESTATE_INGRESS/SimpleResearchAgent/search \
+curl $RESTATE_CLOUD_INGRESS/DeepResearchAgent/run \
   -H "Authorization: Bearer $RESTATE_AUTH_TOKEN" \
-  --json '"What changed in Postgres 17 logical replication?"'
-
-curl $RESTATE_INGRESS/DeepResearchAgent/run \
-  -H "Authorization: Bearer $RESTATE_AUTH_TOKEN" \
-  --json '"durable execution"'
+  --json '"What is new in AI?"'
 ```
 
 
