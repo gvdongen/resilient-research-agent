@@ -1,10 +1,6 @@
-# A long-running research agent with Restate + Tavily + LangChain
+# A long-running research agent with Restate + Tavily + LangChain + Modal
 
-🌐 [restate.dev](https://restate.dev) &nbsp;·&nbsp; 📚 [docs.restate.dev](https://docs.restate.dev) &nbsp;·&nbsp; 🤖 [AI agent guides](https://docs.restate.dev/ai) &nbsp;·&nbsp; 📦 [More AI examples](https://github.com/restatedev/ai-examples) &nbsp;·&nbsp; 💬 [Discord](https://discord.gg/skW3AZ6uGd)
-
----
-
-**Build a research agent that runs for days.** A daily loop that:
+**Build a production-ready, resilient, autonomous research agent that runs for days, weeks, or years.** A daily loop that:
 
 - 🔍 scans the news on a topic every morning
 - 💬 asks you on Slack which story to dive deeper into
@@ -13,13 +9,14 @@
 - 📨 posts the final report to Slack
 - 🔁 self-schedules tomorrow's run
 
-All driven by **one durable handler**. No cron, no queue, no session store.
+All driven by **one durable handler**. No cron, no queue, no session store, zero infra to manage.
 
 **The stack:**
 
 - **[Restate](https://restate.dev)** — makes every LLM call and tool call durable; suspends handlers for hours without holding compute; fan-out, retries, self-scheduling
 - **[LangChain](https://python.langchain.com/)** — `create_agent` for the agent loop, `RestateMiddleware()` to journal every LLM response
 - **[Tavily](https://tavily.com)** — `web_search`, `extract_urls`, `crawl_site` for the web tools
+- **[Modal](https://modal.com/)** — runs the Restate services as serverless functions that scale to 0 when idle
 
 The canonical code lives in **`app/`** — one file per phase, each fully
 self-contained (own tools, own agent, no cross-phase imports):
@@ -235,29 +232,28 @@ docker.restate.dev/restatedev/restate:latest
 Pick an implementation and run it in another terminal:
 
 ```bash
-# Canonical LangChain version
-cd app && uv run .
+uv run app
 
 # — or — manual litellm loop
-cd app_litellm && uv run .
+uv run app_litellm
 ```
 
 Register with Restate. Go to the UI at `localhost:9070` and register the service deployment at `http://host.docker.internal:9080`.
 
 The UI then shows all the services that were registered:
 
-![overview services](./docs/img/overview-ui.png)
+![overview services](docs/img/overview-ui.png)
 
 ## Invoke
 
 ```bash
 # Phase 1 — stateless single research query
 curl localhost:8080/SimpleResearchAgent/search \
-  --json '"What changed in Postgres 17 logical replication?"'
+  --json '"What is new in AI?"'
 
 # Phase 2 — chat session with memory per session id
 curl localhost:8080/ResearchSession/session123/chat \
-  --json '"Summarize recent advances in durable execution."'
+  --json '"What is new in AI?"'
 
 curl localhost:8080/ResearchSession/session123/chat \
   --json '"Tell me more about the second source."'
@@ -265,7 +261,7 @@ curl localhost:8080/ResearchSession/session123/chat \
 curl localhost:8080/ResearchSession/session123/get_history    # inspect
 
 # Phase 3 — autonomous daily news+deep-research loop on a topic
-curl localhost:8080/DeepResearchAgent/run --json '"durable execution"'
+curl localhost:8080/DeepResearchAgent/run --json '"AI"'
 ```
 
 To dive deeper on a digest, copy the curl from the Slack message — it
@@ -283,9 +279,75 @@ Check the execution trace in the Restate UI:
 To stop the daily loop, cancel the pending invocation in the Restate UI
 (`http://localhost:9070`).
 
+## Deploy to Restate Cloud + Modal
 
+You can run production-grade research agents without managing any infra by using
+[Restate Cloud](https://restate.dev) and [Modal](https://modal.com) (or any other serverless functions provider):
 
+- **Restate Cloud** ([restate.dev](https://restate.dev)) hosts the durable
+  broker — journals, KV state, timers, awakeables, retries.
+- **[Modal](https://modal.com)** hosts the Python services as a single ASGI
+  endpoint. Restate Cloud calls into it over HTTP/2.
 
+The repo includes `modal_app.py` at the project root that wraps the same
+`restate.app([...])` from `app/__main__.py` as a Modal ASGI app.
+
+### 0. Sign up for Restate Cloud and Modal
+
+Create a free account at [restate.dev](https://restate.dev) and
+[Modal](https://modal.com).
+
+### 1. Install the Modal CLI and log in
+
+```bash
+uv tool install modal
+modal token new
+```
+
+### 2. Create a Modal secret with the API keys
+
+```bash
+modal secret create research-agent-secrets \
+  OPENAI_API_KEY=sk-... \
+  TAVILY_API_KEY=tvly-... \
+  SLACK_BOT_TOKEN=xoxb-...                # optional, phase 3
+  SLACK_DIGEST_CHANNEL_ID=C...              # optional, phase 3
+  RESTATE_CLOUD_INGRESS=https://<env>.env.<region>.restate.cloud:8080 # optional, phase 3 to print the awakeable resolution URL
+```
+
+### 3. Deploy to Modal
+
+From the project root (so `pyproject.toml` and `app/` resolve correctly):
+
+```bash
+modal deploy modal_app.py
+```
+
+Modal prints a URL like
+`https://<your-org>--deep-research-agent-restate-services.modal.run`.
+
+### 4. Register the deployment with Restate Cloud
+
+Get an API key and ingress URL from the [Restate Cloud UI](https://cloud.restate.dev),
+then register via the UI (Overview → Register Deployment): `https://<your-org>--deep-research-agent-restate-services.modal.run`
+
+All seven services show up in the Restate Cloud UI.
+
+### 5. Invoke against Restate Cloud
+
+Go the Restate Cloud UI, click on the handler you want to invoke (e.g.
+`DeepResearchAgent/run`), and send a message like `"What is new in AI?"`.
+
+Same payloads as locally, just swap the ingress and add the auth header:
+
+```bash
+export RESTATE_INGRESS=https://<env>.env.<region>.restate.cloud:8080
+export RESTATE_AUTH_TOKEN=<your-restate-api-key>
+
+curl $RESTATE_CLOUD_INGRESS/DeepResearchAgent/run \
+  -H "Authorization: Bearer $RESTATE_AUTH_TOKEN" \
+  --json '"What is new in AI?"'
+```
 
 
 
