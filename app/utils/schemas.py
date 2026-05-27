@@ -2,57 +2,16 @@
 from langchain_core.messages import AnyMessage
 from pydantic import BaseModel, ConfigDict, Field
 
-# ---- Phase 1 ---------------------------------------------------------------
-
-
-class Research(BaseModel):
-    """Output of Phase 1's `SimpleResearchAgent.search`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str
-    sources: list[str]
-
-
-# ---- Phase 2 ---------------------------------------------------------------
+# ---- Chat ----------------------------------------------------------------
 
 
 class ChatHistory(BaseModel):
-    """Persistent multi-turn chat history for one ResearchSession key."""
+    """Persistent multi-turn chat history for one DeepResearchAgent key."""
 
     messages: list[AnyMessage] = Field(default_factory=list)
 
 
-# ---- News scout -------------------------------------------------------------
-
-
-class NewsItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    headline: str
-    summary: str
-    url: str
-
-
-class NewsDigest(BaseModel):
-    """Output of NewsScoutAgent: today's news on the topic."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    overview: str
-    items: list[NewsItem]
-
-
 # ---- Planner ----------------------------------------------------------------
-
-
-class PlanRequest(BaseModel):
-    """Input to PlannerAgent.plan — topic plus today's news for context."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    topic: str
-    news: NewsDigest
 
 
 class ResearchPlan(BaseModel):
@@ -64,10 +23,21 @@ class ResearchPlan(BaseModel):
     subtopics: list[str]
 
 
+class PlanDecision(BaseModel):
+    """Human verdict on a proposed ResearchPlan, delivered via a Slack button.
+
+    Reject carries no notes: the human just types their feedback as the next
+    channel message, which re-runs the handler with the rejected plan in view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool
+
+
 # ---- Researchers ------------------------------------------------------------
 
 
-class SubReport(BaseModel):
+class Report(BaseModel):
     """One researcher's findings for a single subtopic."""
 
     model_config = ConfigDict(extra="forbid")
@@ -98,30 +68,21 @@ class FinalReport(BaseModel):
     sources: list[str]
 
 
-class WriteRequest(BaseModel):
+# ---- News scout -------------------------------------------------------------
+
+
+class NewsItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    topic: str
-    plan: ResearchPlan
-    sub_reports: list[SubReport]
+    headline: str
+    summary: str
+    url: str
 
 
-# ---- Orchestrator return ----------------------------------------------------
-
-
-class DailyResult(BaseModel):
-    """What the orchestrator returns each day: always the news, optionally a deep report."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    news: NewsDigest
-    report: FinalReport | None = None
-
-
-class ResearchRequest(BaseModel):
-    """A deep dive topic from the daily news digest that needs further research"""
+class NewsDigest(BaseModel):
+    """Output of NewsScoutAgent: today's news on the topic."""
 
     model_config = ConfigDict(extra="forbid")
 
-    topic: str
-    news: NewsDigest
+    overview: str
+    items: list[NewsItem]
