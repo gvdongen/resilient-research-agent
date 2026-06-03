@@ -1,7 +1,7 @@
 # Deploy as a Slack bot on Restate Cloud + Modal
 
 This folder turns the local agent (see the [project README](../README.md))
-into a production-grade Slack bot driven by Restate Cloud + Modal. Nothing
+into a Slack bot driven by Restate Cloud + Modal. Nothing
 to manage: Restate Cloud hosts the durable broker (journals, KV, timers,
 awakeables, retries), Modal hosts the Python services as serverless
 functions, and a thin Slack webhook in [`modal_app.py`](modal_app.py)
