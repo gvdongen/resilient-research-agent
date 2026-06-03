@@ -1,7 +1,17 @@
-# Deploying the Deep Research Agent to Restate Cloud and Modal
+# Deploy as a Slack bot on Restate Cloud + Modal
 
-Follow these steps to deploy the Deep Research Agent to Restate Cloud and
-Modal.
+This folder turns the local agent (see the [project README](../README.md))
+into a production-grade Slack bot driven by Restate Cloud + Modal. Nothing
+to manage: Restate Cloud hosts the durable broker (journals, KV, timers,
+awakeables, retries), Modal hosts the Python services as serverless
+functions, and a thin Slack webhook in [`modal_app.py`](modal_app.py)
+bridges Slack events to the Restate ingress.
+
+> The agent itself does **not** depend on Slack — its delivery helpers
+> fall back to log output if `SLACK_BOT_TOKEN` is unset. You can deploy
+> the Restate service half (step 4 below) and skip the Slack app
+> entirely; everything is still drivable via `curl` against the Restate
+> Cloud ingress.
 
 ## 0. Sign up for Restate Cloud and Modal
 
@@ -53,10 +63,10 @@ modal secret create research-agent-secrets \
 
 ## 4. Deploy to Modal
 
-From the project root (so `pyproject.toml` and `app/` resolve correctly):
+From the **project root** (so `pyproject.toml` and `app/` resolve correctly):
 
 ```bash
-modal deploy modal_app.py
+modal deploy deploy/modal_app.py
 ```
 
 Modal prints two URLs — one for the Restate services, one for the Slack

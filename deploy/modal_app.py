@@ -4,7 +4,9 @@ Register the resulting URL with Restate Cloud (or any Restate server) as a
 deployment. Restate then calls back into this endpoint over HTTP/2 to drive
 every handler.
 
-    modal deploy modal_app.py
+Run from the project root so `pyproject.toml` and `app/` resolve:
+
+    modal deploy deploy/modal_app.py
     restate dp register https://<org>--deep-research-agent-restate-services.modal.run
 """
 
