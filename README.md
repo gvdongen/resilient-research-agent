@@ -11,7 +11,7 @@
 
 **The stack:**
 
-- **[Restate](https://restate.dev)** — Durable agent orchestrator
+- **[Restate](https://restate.dev)** — Durable agent orchestrator that takes care of retries/recovery, session management, resilient agent-to-agent communication, and task scheduling.
 - **[LangChain](https://python.langchain.com/)** — `create_agent` for the agent loop, `RestateMiddleware()` to journal every LLM response
 - **[Tavily](https://tavily.com)** — `web_search`, `extract_urls`, `crawl_site` for the web tools
 
