@@ -20,6 +20,8 @@ from utils.tools import post_news, to_brief, post_plan, post_report
 from utils.tools import tavily_search, tavily_extract, tavily_crawl, Range
 
 
+# ----------- Durable Agents ---------------------
+
 @tool
 async def web_search(queries: list[str], time_range: Range = "month") -> list[dict]:
     """Search the web with a list of queries. time_range is one of: day, week, month, year."""
@@ -53,8 +55,8 @@ researcher = create_agent(
     tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a focused research analyst. You have web_search, extract_urls,
     and crawl_site available. Investigate the assigned subtopic thoroughly:
-    search with recency-appropriate time_range, then read the most
-    promising sources in full. Keep the loop tight — at most 3 rounds of
+    search 3-5 topics with recency-appropriate time_range, then read the most
+    promising sources in full. Keep the loop tight — at most 2 rounds of
     tool calls. Cite every claim swith a URL. Stop as soon as you have
     enough to write a tight 200-400 word findings section.""",
     response_format=Report,
@@ -70,8 +72,8 @@ async def investigate(_rst: restate.Context, topic: str) -> Report:
     return result["structured_response"]
 
 
+# ----------- Durable Agentic Workflows ---------------------
 
-# ----------- Deep Research Orchestrator ---------------------
 
 planner = create_agent(
     model="openai:gpt-5",
@@ -106,29 +108,20 @@ writer = create_agent(
 )
 
 
-deep_research_agent = restate.VirtualObject("DeepResearchAgent")
-
-
-@deep_research_agent.handler()
-async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None:
-    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(HumanMessage(id=str(rst.uuid()), content=query))
-
-    # Stage 1 — plan, then wait for a human to approve it in Slack.
+async def deep_research(rst: restate.ObjectContext, query: str, history: ChatHistory) -> AIMessage:
+    # Stage 1 — plan
     result = await planner.ainvoke({"messages": history.messages})
     plan: ResearchPlan = result["structured_response"]
 
-    # The /slack/interactivity webhook resolves this awakeable on click.
-    awk_id, decision_future = rst.awakeable(type_hint=PlanDecision)
+    # Stage 2 - human approval of plan
+    awk_id, decision_promise = rst.awakeable(type_hint=PlanDecision)
     await rst.run_typed("post-plan", post_plan, channel=rst.key(), plan=plan, awk_id=awk_id)
-    decision: PlanDecision = await decision_future
+    decision: PlanDecision = await decision_promise
 
-    # Rejected: remember the proposed plan and bail. Human's next message gives feedback.
+    # Rejected - return and wait for feedback
     if not decision.approved:
         msg = f"Proposed plan (rejected — revise per feedback):\n{plan.model_dump_json()}"
-        history.messages.append(AIMessage(id=str(rst.uuid()), content=msg))
-        rst.set("messages", history)
-        return None
+        return AIMessage(id=str(rst.uuid()), content=msg)
 
     # Stage 2 — fan out one ResearchAgent per subtopic, in parallel
     handles = [rst.service_call(investigate, arg=sub) for sub in plan.subtopics]
@@ -142,14 +135,26 @@ async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None
     # Stage 4 — deliver the rich report card back to the channel
     await rst.run_typed("slack-reply", post_report, topic=query, channel=rst.key(), report=report)
 
-    history.messages.append(AIMessage(content=report.model_dump_json(), id=str(rst.uuid())))
+    return AIMessage(content=report.model_dump_json(), id=str(rst.uuid()))
+
+
+# ----------- Durable Sessions ---------------------
+
+deep_research_agent = restate.VirtualObject("DeepResearchAgent")
+
+
+@deep_research_agent.handler()
+async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None:
+    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
+    history.messages.append(HumanMessage(id=str(rst.uuid()), content=query))
+
+    response = await deep_research(rst, query, history)
+
+    history.messages.append(response)
     rst.set("messages", history)
-    return report
 
 
-
-# ----------- Autonomous Daily Research ---------------------
-
+# ----------- Autonomous Research ---------------------
 
 news_scout = create_agent(
     model="openai:gpt-5",

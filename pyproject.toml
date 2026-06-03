@@ -13,11 +13,8 @@ dependencies = [
     "hypercorn",
     "numpydoc",
     "modal>=1.4.3",
-    "restate-sdk",
+    "restate-sdk>=0.18.1",
 ]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-restate-sdk = { path = "../../dev/sdk-python/dist/restate_sdk-0.18.0-cp314-cp314-macosx_11_0_arm64.whl" }

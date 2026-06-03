@@ -27,6 +27,7 @@ app = modal.App("deep-research-agent", image=image)
 )
 @modal.asgi_app()
 def restate_services():
+    import os
     import sys
     sys.path.insert(0, "/root/app")
 
@@ -36,7 +37,7 @@ def restate_services():
     return restate.app(
         services=[deep_research_agent, research_agent],
         protocol="bidi",
-	    identity_keys=["publickeyv1_8c7sHaJgEwqgn6PV1ywre8VkNVyM1HW3mBAJZ1WXwkSd"]
+        identity_keys=[os.environ["RESTATE_CLOUD_PUBLICKEY"]],
     )
 
 

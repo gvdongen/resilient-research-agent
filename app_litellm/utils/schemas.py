@@ -1,53 +1,26 @@
-"""Shared pydantic models for all three phases."""
+"""Shared pydantic models for the litellm flavor.
 
-from pydantic import BaseModel, ConfigDict
+Same shapes as `app/utils/schemas.py`, except `ChatHistory.messages` holds
+raw litellm-format dicts (`{"role": ..., "content": ..., ...}`) instead of
+LangChain `AnyMessage` instances.
+"""
 
-# ---- Phase 1 ---------------------------------------------------------------
+from pydantic import BaseModel, ConfigDict, Field
 
-
-class Research(BaseModel):
-    """Output of Phase 1's `SimpleResearchAgent.search`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str
-    sources: list[str]
+# ---- Chat ------------------------------------------------------------------
 
 
-# ---- News scout -------------------------------------------------------------
+class ChatHistory(BaseModel):
+    """Persistent multi-turn chat history for one DeepResearchAgent key."""
+
+    messages: list[dict] = Field(default_factory=list)
 
 
-class NewsItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    headline: str
-    summary: str
-    url: str
-
-
-class NewsDigest(BaseModel):
-    """Output of NewsScoutAgent: today's news on the topic."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    overview: str
-    items: list[NewsItem]
-
-
-# ---- Planner ----------------------------------------------------------------
-
-
-class PlanRequest(BaseModel):
-    """Input to PlannerAgent.plan — topic plus today's news for context."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    topic: str
-    news: NewsDigest
+# ---- Planner ---------------------------------------------------------------
 
 
 class ResearchPlan(BaseModel):
-    """Output of PlannerAgent: angle + subtopics for parallel research."""
+    """Output of the planner: angle + subtopics for parallel research."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -55,10 +28,21 @@ class ResearchPlan(BaseModel):
     subtopics: list[str]
 
 
-# ---- Researchers ------------------------------------------------------------
+class PlanDecision(BaseModel):
+    """Human verdict on a proposed ResearchPlan, delivered via a Slack button.
+
+    Reject carries no notes: the human just types their feedback as the next
+    channel message, which re-runs the handler with the rejected plan in view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool
 
 
-class SubReport(BaseModel):
+# ---- Researchers -----------------------------------------------------------
+
+
+class Report(BaseModel):
     """One researcher's findings for a single subtopic."""
 
     model_config = ConfigDict(extra="forbid")
@@ -68,7 +52,7 @@ class SubReport(BaseModel):
     sources: list[str]
 
 
-# ---- Writer -----------------------------------------------------------------
+# ---- Writer ----------------------------------------------------------------
 
 
 class Section(BaseModel):
@@ -89,30 +73,21 @@ class FinalReport(BaseModel):
     sources: list[str]
 
 
-class WriteRequest(BaseModel):
+# ---- News scout ------------------------------------------------------------
+
+
+class NewsItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    topic: str
-    plan: ResearchPlan
-    sub_reports: list[SubReport]
+    headline: str
+    summary: str
+    url: str
 
 
-# ---- Orchestrator return ----------------------------------------------------
-
-
-class DailyResult(BaseModel):
-    """What the orchestrator returns each day: always the news, optionally a deep report."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    news: NewsDigest
-    report: FinalReport | None = None
-
-
-class ResearchRequest(BaseModel):
-    """A deep-dive topic from the daily news digest that needs further research."""
+class NewsDigest(BaseModel):
+    """Output of the news scout: today's news on the topic."""
 
     model_config = ConfigDict(extra="forbid")
 
-    topic: str
-    news: NewsDigest
+    overview: str
+    items: list[NewsItem]

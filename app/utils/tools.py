@@ -3,9 +3,11 @@
 
 import logging
 import os
+import random
 from typing import Literal
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 from .schemas import NewsDigest, ResearchPlan, Report, FinalReport
 
 Range = Literal["day", "week", "month", "year"]
@@ -14,10 +16,16 @@ RESTATE_HOST = os.environ.get("RESTATE_CLOUD_INGRESS") or "http://localhost:8080
 
 # ----------- Tavily Tools ---------------------
 
+FAILURE_PROBABILITY = 0
+
 tavily_client = TavilyClient()
 
 
 def tavily_search(query: str, range: Range) -> dict:
+    if random.random() < FAILURE_PROBABILITY:
+        import time
+        time.sleep(random.uniform(0, 2))
+        raise Exception("Tavily API down")
     try:
         result = tavily_client.search(query=query, time_range=range, search_depth="advanced")
     except BadRequestError as e:
@@ -26,7 +34,9 @@ def tavily_search(query: str, range: Range) -> dict:
     return {"query": query, "result": result}
 
 
-def tavily_extract(urls: list[str]) -> dict:
+async def tavily_extract(urls: list[str]) -> dict:
+    if random.random() < FAILURE_PROBABILITY:
+        raise Exception("Tavily API down")
     try:
         return tavily_client.extract(urls=urls, extract_depth="advanced")
     except BadRequestError as e:
@@ -57,14 +67,28 @@ def _slack_client() -> WebClient | None:
     return WebClient(token=token) if token else None
 
 
+def _slack_post(client: WebClient | None, **kwargs) -> str | None:
+    """Try chat.postMessage; on auth/other Slack failure, treat as no client.
+
+    Returns the message ts on success, None when the caller should fall back to
+    the log-only path (no token, or token rejected by Slack)."""
+    if client is None:
+        return None
+    try:
+        return client.chat_postMessage(**kwargs)["ts"]
+    except SlackApiError as e:
+        err = e.response.get("error", "unknown") if e.response else "unknown"
+        logger.warning("Slack post failed (%s) — falling back to log output.", err)
+        return None
+
+
 def post_to_channel(channel: str, text: str) -> str:
     """Post a plain message to a Slack channel. Returns the message ts."""
-    client = _slack_client()
-    if client is None:
+    ts = _slack_post(_slack_client(), channel=channel, text=text)
+    if ts is None:
         logger.info("\n=== Slack reply (channel=%s) ===\n%s\n", channel, text)
         return "log:reply"
-    resp = client.chat_postMessage(channel=channel, text=text)
-    return resp["ts"]
+    return ts
 
 
 def to_brief(topic: str, plan: ResearchPlan, sub_reports: list[Report]) -> str:
@@ -89,8 +113,7 @@ def post_plan(channel: str, plan: ResearchPlan, awk_id: str) -> str:
     subtopics_md = "\n".join(f"• {s}" for s in plan.subtopics)
     text = f"_{plan.rationale}_\n\n*Subtopics:*\n{subtopics_md}"
 
-    client = _slack_client()
-    if client is None:
+    def log_only() -> str:
         resolve_url = f"{RESTATE_HOST}/restate/awakeables/{awk_id}/resolve"
         auth = "" if "localhost" in RESTATE_HOST else "-H \"Authorization: Bearer $RESTATE_AUTH_TOKEN\""
         logger.info(
@@ -100,6 +123,10 @@ def post_plan(channel: str, plan: ResearchPlan, awk_id: str) -> str:
             channel, text, resolve_url, auth, resolve_url, auth,
         )
         return "log:plan"
+
+    client = _slack_client()
+    if client is None:
+        return log_only()
 
     blocks: list[dict] = [
         {
@@ -127,10 +154,10 @@ def post_plan(channel: str, plan: ResearchPlan, awk_id: str) -> str:
             ],
         },
     ]
-    resp = client.chat_postMessage(
-        channel=channel, text="Research plan needs your approval", blocks=blocks
+    ts = _slack_post(
+        client, channel=channel, text="Research plan needs your approval", blocks=blocks
     )
-    return resp["ts"]
+    return ts if ts is not None else log_only()
 
 
 def post_news(topic: str, channel: str, digest: NewsDigest) -> str:
@@ -141,8 +168,7 @@ def post_news(topic: str, channel: str, digest: NewsDigest) -> str:
         for idx, i in enumerate(digest.items)
     )
 
-    client = _slack_client()
-    if client is None:
+    def log_only() -> str:
         logger.info(
             "\n=== Today's news: %s ===\n%s\n\n%s\n\n"
             "▶ Want to dive deeper? Just reply in the channel with what to research.\n",
@@ -151,6 +177,10 @@ def post_news(topic: str, channel: str, digest: NewsDigest) -> str:
             items_md,
         )
         return "log:news"
+
+    client = _slack_client()
+    if client is None:
+        return log_only()
 
     blocks: list[dict] = [
         {
@@ -171,12 +201,13 @@ def post_news(topic: str, channel: str, digest: NewsDigest) -> str:
             ],
         },
     ]
-    resp = client.chat_postMessage(
+    ts = _slack_post(
+        client,
         channel=channel,
         text=f"Today's news: {topic}",
         blocks=blocks,
     )
-    return resp["ts"]
+    return ts if ts is not None else log_only()
 
 
 def post_report(
@@ -185,8 +216,7 @@ def post_report(
     """Post the FinalReport (rich Block Kit). Returns the message ts.
 
     If `thread_ts` is given, posts as a reply on that news card's thread."""
-    client = _slack_client()
-    if client is None:
+    def log_only() -> str:
         sections = "\n\n".join(f"## {s.heading}\n{s.body}" for s in report.sections)
         sources = "\n".join(f"• {s}" for s in report.sources)
         logger.info(
@@ -198,6 +228,10 @@ def post_report(
             sources,
         )
         return "log:report"
+
+    client = _slack_client()
+    if client is None:
+        return log_only()
 
     blocks: list[dict] = [
         {
@@ -233,10 +267,11 @@ def post_report(
             }
         )
 
-    resp = client.chat_postMessage(
+    ts = _slack_post(
+        client,
         channel=channel,
         text=report.headline,
         blocks=blocks,
         thread_ts=thread_ts,
     )
-    return resp["ts"]
+    return ts if ts is not None else log_only()
