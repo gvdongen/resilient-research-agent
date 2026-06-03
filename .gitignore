@@ -1,4 +1,5 @@
 .env
+.envf
 .venv
 .idea
 restate-data/
