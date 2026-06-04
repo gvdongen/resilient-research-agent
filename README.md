@@ -295,6 +295,5 @@ To stop the daily loop, cancel the pending invocation in the Restate UI
 
 ## Deploy to production
 
-Ready to ship this as a real bot on Restate Cloud + Modal, with Slack as
-the delivery channel? See **[`deploy/`](deploy/)** for the end-to-end
-recipe.
+Ship this as a real bot on Restate Cloud + serverless functions (Modal, Render, Railway, etc.), 
+with Slack as the delivery channel.
