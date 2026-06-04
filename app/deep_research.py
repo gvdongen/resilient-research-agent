@@ -54,10 +54,10 @@ researcher = create_agent(
     model="openai:gpt-5",
     tools=[web_search, extract_urls, crawl_sites],
     system_prompt="""You are a focused research analyst. You have web_search, extract_urls,
-    and crawl_site available. Investigate the assigned subtopic thoroughly:
+    and crawl_sites available. Investigate the assigned subtopic thoroughly:
     search 3-5 topics with recency-appropriate time_range, then read the most
     promising sources in full. Keep the loop tight — at most 2 rounds of
-    tool calls. Cite every claim swith a URL. Stop as soon as you have
+    tool calls. Cite every claim with a URL. Stop as soon as you have
     enough to write a tight 200-400 word findings section.""",
     response_format=Report,
     middleware=[RestateMiddleware()]
@@ -100,7 +100,7 @@ writer = create_agent(
     middleware=[
         RestateMiddleware(),
         SummarizationMiddleware(
-            model=init_durable_model("gpt-5.4-mini"),
+            model=init_durable_model("openai:gpt-5"),
             trigger=("tokens", 4000),
             keep=("messages", 10),
         ),
@@ -133,7 +133,7 @@ async def deep_research(rst: restate.ObjectContext, query: str, history: ChatHis
     report: FinalReport = result["structured_response"]
 
     # Stage 4 — deliver the rich report card back to the channel
-    await rst.run_typed("slack-reply", post_report, topic=query, channel=rst.key(), report=report)
+    await rst.run_typed("post-report", post_report, topic=query, channel=rst.key(), report=report)
 
     return AIMessage(content=report.model_dump_json(), id=str(rst.uuid()))
 
@@ -152,6 +152,8 @@ async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None
 
     history.messages.append(response)
     rst.set("messages", history)
+
+    return response
 
 
 # ----------- Autonomous Research ---------------------
@@ -177,7 +179,7 @@ async def scan_news(rst: restate.ObjectContext, topic: str):
     news: NewsDigest = result["structured_response"]
 
     # Post to Slack
-    await rst.run_typed("slack-news-update", post_news, topic=topic, channel=rst.key(), digest=news)
+    await rst.run_typed("post-news", post_news, topic=topic, channel=rst.key(), digest=news)
 
     # Update VO state to answer questions later
     history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()

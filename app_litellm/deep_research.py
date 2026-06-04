@@ -148,7 +148,7 @@ RESEARCHER_SYSTEM = """You have web_search, extract_urls,
 and crawl_site available. Investigate the assigned subtopic thoroughly:
 search 3-5 topics with recency-appropriate time_range, then read the most
 promising sources in full. Keep the loop tight — at most 2 rounds of
-tool calls. Cite every claim swith a URL. Stop as soon as you have
+tool calls. Cite every claim with a URL. Stop as soon as you have
 enough to write a tight 200-400 word findings section."""
 
 PLANNER_SYSTEM = """You are a senior research planner. Given a topic and a digest of
@@ -238,7 +238,7 @@ async def deep_research(
 
     # Stage 5 — deliver the rich report card back to the channel
     await rst.run_typed(
-        "slack-reply", post_report, topic=query, channel=rst.key(), report=report
+        "post-report", post_report, topic=query, channel=rst.key(), report=report
     )
 
     return {"role": "assistant", "content": report.model_dump_json()}
@@ -250,7 +250,7 @@ deep_research_agent = restate.VirtualObject("DeepResearchAgent")
 
 
 @deep_research_agent.handler()
-async def research(rst: restate.ObjectContext, query: str) -> None:
+async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None:
     history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
     history.messages.append({"role": "user", "content": query})
 
@@ -258,6 +258,8 @@ async def research(rst: restate.ObjectContext, query: str) -> None:
 
     history.messages.append(response)
     rst.set("messages", history)
+
+    return response
 
 
 # ----------- Autonomous Research ---------------------
@@ -278,7 +280,7 @@ async def scan_news(rst: restate.ObjectContext, topic: str):
 
     # Post to Slack
     await rst.run_typed(
-        "slack-news-update", post_news, topic=topic, channel=rst.key(), digest=news
+        "post-news", post_news, topic=topic, channel=rst.key(), digest=news
     )
 
     # Update VO state so the planner can pick up the news on a follow-up "research" call

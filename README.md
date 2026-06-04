@@ -118,7 +118,7 @@ What you get:
   If one researcher crashes, only that researcher retries — the others
   keep their journaled progress.
 
-![Phase 2](./docs/img/phase-2.png)
+![Phase 2](docs/img/phase-2.png)
 
 ## 3. Durable Sessions
 
@@ -158,7 +158,7 @@ What you get:
   plan is appended to history; the next message re-enters the same
   handler with the previous plan in view, so the planner revises.
 
-![overview](./docs/img/phase-2.png)
+![Phase 3](docs/img/phase-3.png)
 
 ## 4. Autonomous Research
 
@@ -199,7 +199,7 @@ What you get:
 - **Run forever.** Each daily run schedules the next one before returning,
   so the loop is self-perpetuating. Cancel it from the Restate UI to stop.
 
-![overview](./docs/img/phase-3.png)
+![overview](docs/img/phase-2.png)
 
 ## Optional — roll your own agent loop
 

@@ -1,4 +1,4 @@
-"""`init_restate_model` — `init_chat_model` with durable invoke.
+"""`init_durable_model` — `init_chat_model` with durable invoke.
 
 Each `ainvoke` on the returned model is wrapped in `ctx.run_typed`, so
 retries replay the LLM response from the journal instead of re-calling
@@ -9,7 +9,7 @@ Usage:
     from langchain.agents import create_agent
     from utils.restate_chat_model import init_restate_model
 
-    model = init_restate_model("openai:gpt-5")
+    model = init_durable_model("openai:gpt-5")
     agent = create_agent(model=model, tools=[...])
 
     # inside a Restate handler:

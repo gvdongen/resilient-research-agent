@@ -1,7 +1,7 @@
 [project]
 name = "deep-research-agent"
 version = "0.1.0"
-description = "Restate × LiteLLM research agent (hand-rolled tool-call loop)."
+description = "Restate resilient, autonomous, deep research agent."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic-ai",
