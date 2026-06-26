@@ -93,8 +93,7 @@ async def run_agent(
     tools: list | None = None,
     max_turns: int = 3,
 ) -> BaseModel:
-    """Bounded tool-using agent loop. Every LLM call + tool call is journaled,
-    so retries replay from the journal instead of re-executing paid calls."""
+
     msgs = list(messages)
     for _ in range(max_turns):
         response = await ctx.run_typed(

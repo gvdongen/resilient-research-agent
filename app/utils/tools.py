@@ -16,7 +16,7 @@ RESTATE_HOST = os.environ.get("RESTATE_CLOUD_INGRESS") or "http://localhost:8080
 
 # ----------- Tavily Tools ---------------------
 
-FAILURE_PROBABILITY = 0
+FAILURE_PROBABILITY = 0.1
 
 tavily_client = TavilyClient()
 

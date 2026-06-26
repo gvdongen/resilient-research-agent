@@ -8,11 +8,12 @@ Option to daily scan news on a topic
 """
 
 from datetime import timedelta
-import restate
+import restate as rst
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
+from restate import ObjectContext, Context
 from restate.ext.langchain import RestateMiddleware, restate_context
 from utils.restate_chat_model import init_durable_model
 from utils.schemas import *
@@ -29,7 +30,7 @@ async def web_search(queries: list[str], time_range: Range = "month") -> list[di
         restate_context().run_typed(f"web_search:{q}", tavily_search, query=q, range=time_range)
         for q in queries
     ]
-    await restate.gather(*searches)
+    await rst.gather(*searches)
     return [await result for result in searches]
 
 
@@ -46,7 +47,7 @@ async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
         restate_context().run_typed(f"crawl_site:{u}", tavily_crawl, url=u, instructions=instructions)
         for u in urls
     ]
-    await restate.gather(*crawls)
+    await rst.gather(*crawls)
     return [await result for result in crawls]
 
 
@@ -63,11 +64,11 @@ researcher = create_agent(
     middleware=[RestateMiddleware()]
 )
 
-research_agent = restate.Service("ResearchAgent")
+research_agent = rst.Service("ResearchAgent")
 
 
 @research_agent.handler()
-async def investigate(_rst: restate.Context, topic: str) -> Report:
+async def investigate(_restate: Context, topic: str) -> Report:
     result = await researcher.ainvoke({"messages": f"Topic: {topic}"})
     return result["structured_response"]
 
@@ -108,50 +109,46 @@ writer = create_agent(
 )
 
 
-async def deep_research(rst: restate.ObjectContext, query: str, history: ChatHistory) -> AIMessage:
-    # Stage 1 — plan
-    result = await planner.ainvoke({"messages": history.messages})
-    plan: ResearchPlan = result["structured_response"]
+# ----------- Durable Sessions ---------------------
 
-    # Stage 2 - human approval of plan
-    awk_id, decision_promise = rst.awakeable(type_hint=PlanDecision)
-    await rst.run_typed("post-plan", post_plan, channel=rst.key(), plan=plan, awk_id=awk_id)
-    decision: PlanDecision = await decision_promise
+deep_research_agent = rst.VirtualObject("DeepResearchAgent")
+
+
+@deep_research_agent.handler()
+async def research(restate: ObjectContext, query: str) -> FinalReport | None:
+    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
+    history.messages.append(HumanMessage(id=str(restate.uuid()), content=query))
+
+    # 1 — plan
+    result = await planner.ainvoke({"messages": history.messages})
+    plan = result["structured_response"]
+
+    # 2 - human approval of plan
+    awk_id, decision_promise = restate.awakeable(type_hint=PlanDecision)
+    await restate.run_typed("slack-message", post_plan, channel=restate.key(), plan=plan, awk_id=awk_id)
+    decision = await decision_promise
 
     # Rejected - return and wait for feedback
     if not decision.approved:
         msg = f"Proposed plan (rejected — revise per feedback):\n{plan.model_dump_json()}"
-        return AIMessage(id=str(rst.uuid()), content=msg)
+        return AIMessage(id=str(restate.uuid()), content=msg)
 
-    # Stage 2 — fan out one ResearchAgent per subtopic, in parallel
-    handles = [rst.service_call(investigate, arg=sub) for sub in plan.subtopics]
-    await restate.gather(*handles)
+    # 3 — fan out one ResearchAgent per subtopic, in parallel
+    handles = [restate.service_call(investigate, arg=sub) for sub in plan.subtopics]
+    await rst.gather(*handles)
     sub_reports = [await h for h in handles]
 
-    # Stage 3 — synthesize the final report
+    # 4 — synthesize the final report
     result = await writer.ainvoke({"messages": to_brief(query, plan, sub_reports)})
-    report: FinalReport = result["structured_response"]
+    report = result["structured_response"]
 
-    # Stage 4 — deliver the rich report card back to the channel
-    await rst.run_typed("post-report", post_report, topic=query, channel=rst.key(), report=report)
+    # 5 — deliver the rich report card back to the channel
+    await restate.run_typed("slack-message", post_report, channel=restate.key(), topic=query, report=report)
 
-    return AIMessage(content=report.model_dump_json(), id=str(rst.uuid()))
-
-
-# ----------- Durable Sessions ---------------------
-
-deep_research_agent = restate.VirtualObject("DeepResearchAgent")
-
-
-@deep_research_agent.handler()
-async def research(rst: restate.ObjectContext, query: str) -> FinalReport | None:
-    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(HumanMessage(id=str(rst.uuid()), content=query))
-
-    response = await deep_research(rst, query, history)
+    response = AIMessage(id=str(restate.uuid()), content=report.model_dump_json())
 
     history.messages.append(response)
-    rst.set("messages", history)
+    restate.set("messages", history)
 
     return response
 
@@ -173,18 +170,18 @@ news_scout = create_agent(
 
 
 @deep_research_agent.handler()
-async def scan_news(rst: restate.ObjectContext, topic: str):
+async def scan_news(restate: ObjectContext, topic: str):
     # News scan agent
     result = await news_scout.ainvoke({"messages": f"Topic: {topic}"})
     news: NewsDigest = result["structured_response"]
 
     # Post to Slack
-    await rst.run_typed("post-news", post_news, topic=topic, channel=rst.key(), digest=news)
+    await restate.run_typed("post-news", post_news, topic=topic, channel=restate.key(), digest=news)
 
     # Update VO state to answer questions later
-    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(AIMessage(content=news.model_dump_json(), id=str(rst.uuid())))
-    rst.set("messages", history)
+    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
+    history.messages.append(AIMessage(content=news.model_dump_json(), id=str(restate.uuid())))
+    restate.set("messages", history)
 
     # Self-schedule tomorrow (same topic + channel)
-    rst.object_send(scan_news, key=rst.key(), arg=topic, send_delay=timedelta(days=1))
+    restate.object_send(scan_news, key=restate.key(), arg=topic, send_delay=timedelta(days=1))
