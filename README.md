@@ -1,299 +1,221 @@
-# A long-running research agent with Restate + Tavily + LangChain
+# A steerable, governed research agent with Restate + Tavily
 
-**Build a production-ready, resilient, autonomous research agent that runs for days, weeks, or years:** 
+A long-running deep-research agent (planner → parallel researchers → writer) that you can
+**talk to while it works** and that routes **every model call through one governed gateway** —
+built on [Restate](https://restate.dev). The demo is designed to show the two things that make
+Restate different from "just a durable workflow engine":
 
-- 🔍 scans the news on a topic every morning
-- 💬 lets a user reply to request a deep dive
-- 📋 proposes a research plan and waits (with no compute held) for approval
-- 🚀 fans out a planner + parallel researchers + writer
-- 📨 delivers the final report back to the user
-- 🔁 self-schedules tomorrow's run
+1. **Steer / interrupt / enqueue a run that is already in flight.** Send a follow-up mid-run and
+   it either folds into the live run (*steer*), cancels-and-restarts on a new goal (*interrupt*),
+   or runs after (*enqueue*). Interrupt cancels the run **and its whole fan-out of researchers**
+   in one durable signal — distributed stack-unwinding, with cleanup that always runs.
+2. **An LLM gateway: model-policy + org-wide flow control.** Every model call goes through one
+   `LLMGateway` service that enforces a model allow-list and runs inside a concurrency-limited
+   *scope*, so one config line caps concurrent model spend across the whole org — no Redis, no
+   semaphore.
 
-**The stack:**
+The agent loop is hand-written against `litellm.acompletion`; durability, steering, state, and
+flow control all come from Restate.
 
-- **[Restate](https://restate.dev)** — Durable agent orchestrator that takes care of retries/recovery, session management, resilient agent-to-agent communication, pause/resume human approvals, and task scheduling.
-- **[LangChain](https://python.langchain.com/)** — `create_agent` for the agent loop, `RestateMiddleware()` to journal every LLM response
-- **[Tavily](https://tavily.com)** — `web_search`, `extract_urls`, `crawl_site` for the web tools
+> The canonical demo lives in **`app_litellm/deep_research.py`**. The same workflow built with
+> LangChain's `create_agent` is in `app/deep_research.py` (kept as a framework-interop reference).
 
-The canonical code lives in **`app/deep_research.py`** and has four sections that build on each other:
+## Architecture
 
-| Section                      | Restate primitive                              | What's new                                                                                                                              |
-|------------------------------|------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| 1. Durable Agents            | `restate.Service` + `RestateMiddleware`        | A LangChain agent whose every LLM + tool call is journaled. Parallel tool calls fan out via `restate.gather`. Crashes resume mid-loop.  |
-| 2. Durable Agentic Workflows | `ctx.service_call` + `restate.gather` + `awakeable` | Planner → N parallel researchers → writer, with a human-in-the-loop approval gate that suspends with no compute held.                   |
-| 3. Durable Sessions          | `restate.VirtualObject` + `ctx.get/set`        | A research agent keyed by session id. Multi-turn history persisted in Restate's KV. Concurrent calls per key serialize automatically.   |
-| 4. Autonomous Research       | `ctx.object_send(..., send_delay=...)`         | A daily news scout that self-schedules tomorrow's run from inside its own handler — no cron, no scheduler.                              |
+Four Restate objects, keyed by the Slack thread / session id:
 
-## 1. Durable Agents
+| Object | Kind | Role |
+|--------|------|------|
+| `Controller` | Virtual Object | Entry point. Owns the session history + the in-flight run's invocation id. Routes each new message to steer / interrupt / enqueue. |
+| `DeepResearchAgent.research` | Virtual Object | The long-running run the Controller dispatches and tracks. Planner → approval → fan-out → writer. Cancellable. |
+| `ResearchAgent.investigate` | Service | One subtopic researcher (its own durable agent loop). The workflow fans out N of these in parallel. |
+| `LLMGateway.complete` | Service | Every model call goes through here: model allow-list policy, then the journaled provider call. Invoked through `ctx.scope("llm")` for flow control. |
 
-The starting point: a single LangChain `create_agent(...)` wrapped in a
-Restate service handler. `RestateMiddleware` journals every model response;
-each Tavily tool wraps its call in `restate_context().run_typed(...)`.
-
-```python
-researcher = create_agent(
-    model="openai:gpt-5",
-    tools=[web_search, extract_urls, crawl_sites],
-    system_prompt=RESEARCHER_PROMPT,
-    response_format=Report,
-    middleware=[RestateMiddleware()],
-)
-
-research_agent = restate.Service("ResearchAgent")
-
-@research_agent.handler()
-async def investigate(_rst: restate.Context, topic: str) -> Report:
-    result = await researcher.ainvoke({"messages": f"Topic: {topic}"})
-    return result["structured_response"]
+```
+Slack msg ─▶ Controller (history + steer/interrupt/enqueue)
+                 │ object_send + track invocation id
+                 ▼
+            DeepResearchAgent.research ──▶ planner ─▶ [human approval]
+                 │                                        │ fan out
+                 │                                        ▼
+                 │                         N × ResearchAgent.investigate
+                 │                                        │
+                 └────────────── every model call ───────┴──▶ ctx.scope("llm").service_call(LLMGateway.complete)
+                                                                   │
+                                                          model allow-list + concurrency cap
 ```
 
-Without Restate, a crash mid-loop would re-run *every* LLM turn and *every*
-tool call from scratch — burning OpenAI tokens and Tavily quota, and
-producing different (non-deterministic) results on the retry.
+## The two differentiators in code
 
-What you get:
-
-- **Retries & recovery.** Every model response is recorded in the invocation
-  journal by the middleware. Every Tavily call is recorded by
-  `restate_context().run_typed(...)`. On replay, completed steps return
-  their journaled result instead of re-executing.
-- **Exactly-once external calls.** Paid LLM + Tavily calls do not re-execute
-  on retries of subsequent steps.
-- **Parallel tool calls stay deterministic.** When the LLM emits N tool
-  calls in one turn, Restate journals their outcomes so the agent loop
-  replays in a consistent order.
-
-Demo: You can simulate failures in the Tavily tools by setting the `FAILURE_PROBABILITY = 0.2` in `app/utils/tools.py` 
-The Restate UI shows the retries and eventual journaled success:
-
-![overview](./docs/img/phase-1.png)
-
-## 2. Durable Agentic Workflows
-
-One agent isn't enough for a serious research report. The next step composes
-several agents into a workflow:
-
-1. **Planner** turns the topic + today's news into a research plan
-   (rationale + 3-5 subtopics).
-2. **Human approval gate** delivers the plan to the user with Approve /
-   Reject affordances and suspends until the user responds.
-3. **N parallel `ResearchAgent` invocations** investigate each subtopic.
-4. **Writer** synthesises the findings into the final report.
+### 1. Steer / interrupt / enqueue (`Controller.message`)
+A Virtual Object can't act on *itself* while busy (a second handler just queues). So the
+Controller tracks the run as a *separate* invocation it can cancel or signal:
 
 ```python
-async def deep_research(rst, query, history):
-    # Plan
-    result = await planner.ainvoke({"messages": history.messages})
-    plan: ResearchPlan = result["structured_response"]
-
-    # Human approval — suspend on an awakeable, no compute held
-    awk_id, decision_promise = rst.awakeable(type_hint=PlanDecision)
-    await rst.run_typed("post-plan", post_plan, channel=rst.key(), plan=plan, awk_id=awk_id)
-    decision = await decision_promise
-    if not decision.approved:
-        return AIMessage(content=f"Plan rejected — revise per feedback:\n{plan.model_dump_json()}")
-
-    # Fan out one ResearchAgent per subtopic, in parallel
-    handles = [rst.service_call(investigate, arg=sub) for sub in plan.subtopics]
-    await restate.gather(*handles)
-    sub_reports = [await h for h in handles]
-
-    # Synthesise and deliver
-    result = await writer.ainvoke({"messages": to_brief(query, plan, sub_reports)})
-    report: FinalReport = result["structured_response"]
-    await rst.run_typed("post-report", post_report, topic=query, channel=rst.key(), report=report)
-    return AIMessage(content=report.model_dump_json())
+current = await ctx.get("current", type_hint=str)
+if current is None:
+    await _start(ctx, history)                       # nothing running → just start
+else:
+    match await _classify(ctx, goal, text):
+        case "interrupt":
+            ctx.cancel_invocation(current)           # cancels the run AND its fan-out
+            await _start(ctx, history)               # roll forward to the new goal
+        case "steer":
+            ctx.resolve_signal(current, "steer", text)   # fold into the live run
+        case _:  # enqueue
+            await _start(ctx, history)               # run VO serializes → runs after
 ```
 
-What you get:
-
-- **Durable workflows.** Compose deterministic workflows, where each step
-  gets journaled and replayed on retries.
-- **Durable suspension on the approval gate.** `ctx.awakeable()` parks the
-  workflow until a delivery channel (a button click, an HTTP call, a CLI
-  command) resolves it — potentially hours later — with **no compute
-  held**.
-- **Durable fan-out.** Each subtopic spawns a separate `ResearchAgent`
-  invocation with its own journal; `restate.gather` waits for all of them.
-  If one researcher crashes, only that researcher retries — the others
-  keep their journaled progress.
-
-![Phase 2](docs/img/phase-2.png)
-
-## 3. Durable Sessions
-
-Wrap that workflow in a Virtual Object keyed by a session id and you get
-a stateful, multi-turn research assistant — each session has its own
-history. Without Restate you'd need a session store (Redis, Postgres) and
-a lock per session to prevent two follow-ups from racing on the same
-conversation log.
-
-The session key is whatever identifies a conversation in your delivery
-channel: a Slack channel, a user id, a tenant — anything stable.
+The run catches the cancellation, runs durable cleanup, and re-raises:
 
 ```python
-deep_research_agent = restate.VirtualObject("DeepResearchAgent")
-
-@deep_research_agent.handler()
-async def research(rst: restate.ObjectContext, query: str):
-    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(HumanMessage(content=query))
-
-    response = await deep_research(rst, query, history)
-
-    history.messages.append(response)
-    rst.set("messages", history)
+try:
+    response = await deep_research(ctx, query, history)
+except restate.TerminalError as e:
+    if e.status_code == 409:                         # cancelled by an interrupt
+        await ctx.run_typed("stopped", post_to_channel, channel=ctx.key(), text="⏹️ Stopped…")
+    raise
 ```
 
-What you get:
-
-- **Per-key state in Restate's KV.** `ctx.get("messages")` / `ctx.set(...)`
-  persists the chat history per session. No external DB.
-- **Single-writer per key.** Concurrent calls to
-  `DeepResearchAgent/<session>/research` serialise automatically — the
-  second call waits for the first to finish.
-- **State survives crashes.** Restart the process, follow up days later,
-  the assistant still remembers earlier turns (and earlier news digests).
-- **Plan rejection just works.** If the user clicks Reject, the rejected
-  plan is appended to history; the next message re-enters the same
-  handler with the previous plan in view, so the planner revises.
-
-![Phase 3](docs/img/phase-3.png)
-
-## 4. Autonomous Research
-
-Use Restate's task scheduling feature to let the agent schedule itself.
-Add a handler onto the same Virtual Object: it scans the news on a topic, delivers the
-digest to the session, and self-schedules tomorrow's run. The user
-replies to trigger a deep dive — which lands in the **same VO** as a
-`research` call, so the news context is already in the conversation
-history.
+### 2. LLM gateway = policy + flow control (`LLMGateway.complete`)
+Every model call is routed through one scoped service call:
 
 ```python
-@deep_research_agent.handler()
-async def scan_news(rst: restate.ObjectContext, topic: str):
-    result = await news_scout.ainvoke({"messages": f"Topic: {topic}"})
-    news: NewsDigest = result["structured_response"]
-
-    await rst.run_typed("post-news", post_news, topic=topic, channel=rst.key(), digest=news)
-
-    # Append today's digest to the session's history so a follow-up
-    # "research" call sees the news as context.
-    history = await rst.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(AIMessage(content=news.model_dump_json()))
-    rst.set("messages", history)
-
-    # Self-schedule tomorrow's run on this same session + topic
-    rst.object_send(scan_news, key=rst.key(), arg=topic, send_delay=timedelta(days=1))
+raw = await ctx.scope("llm").service_call(complete, arg=LLMRequest(...), limit_key=...)
 ```
-
-What you get:
-
-- **Self-scheduling without cron.** `ctx.object_send(scan_news, ...,
-  send_delay=timedelta(days=1))` queues tomorrow's run inside Restate. The
-  delayed invocation survives server restarts; no external scheduler
-  needed.
-- **One key, two handlers, shared state.** `scan_news` writes the digest
-  into the VO's history; the user's reply (`research`) reads it back —
-  same key, automatically serialised.
-- **Run forever.** Each daily run schedules the next one before returning,
-  so the loop is self-perpetuating. Cancel it from the Restate UI to stop.
-
-![overview](docs/img/phase-2.png)
-
-## Optional — roll your own agent loop
-
-LangChain isn't required. Restate's durability primitives work with any LLM
-client. If you want full control over the loop, the same four sections live
-in **`app_litellm/deep_research.py`** with identical service names and
-payloads — but the agent loop is hand-written against `litellm.acompletion`:
 
 ```python
-async def run_agent(ctx, *, messages, output_model, use_tools=True, max_turns=3):
-    msgs = list(messages)
-    for _ in range(max_turns):
-        response = await ctx.run_typed("llm", call_llm, messages=msgs,
-                                        output_model=output_model,
-                                        tools=TOOL_SPECS if use_tools else None)
-        msg = response.choices[0].message
-        msgs.append(msg.model_dump(exclude_none=True))
-        if not msg.tool_calls:
-            return output_model.model_validate_json(msg.content)
-        handles = [
-            ctx.run_typed(tc.function.name, TOOLS[tc.function.name],
-                          **json.loads(tc.function.arguments))
-            for tc in msg.tool_calls
-        ]
-        await restate.gather(*handles)
-        # append tool results, loop
+@llm_gateway.handler()
+async def complete(ctx, req: LLMRequest) -> dict:
+    if req.model not in APPROVED_MODELS:                       # policy — instant, no spend
+        raise restate.TerminalError(f"Model '{req.model}' is not approved")
+    return await ctx.run_typed("provider", _provider_call, req=req)   # journaled call
 ```
 
-Same Restate APIs (`ctx.run_typed`, `restate.gather`, `ctx.awakeable`,
-`ctx.object_send`); the only difference is you wrap the LLM call yourself
-instead of letting `RestateMiddleware` do it. Swap `litellm` for the OpenAI
-SDK, Anthropic SDK, or anything else — the durability story is unchanged.
+A `ctx.run` step can't be flow-controlled; a scoped `service_call` can. With one rule —
+`restate rules set llm --concurrency 3` — Restate caps concurrent model calls across every
+session that shares the `"llm"` scope. Set `PER_SESSION_FAIRNESS = True` to instead give each
+session its own queue (`limit_key=<session>`) so one busy session can't starve the others.
 
 ## Run locally
-### 1. Setup
 
+### 1. Setup
 ```bash
 uv sync
 export OPENAI_API_KEY=sk-...
-export TAVILY_API_KEY=tvly-...          
+export TAVILY_API_KEY=tvly-...
+# optional — wire to a real Slack channel; otherwise delivery prints to stdout
+export SLACK_BOT_TOKEN=xoxb-...
 ```
 
-The delivery helpers (news digest, plan approval, final report) print to
-the service's stdout by default — with ready-to-paste `curl` commands for
-the awakeables. Wire them to a real channel (e.g. Slack) only when you
-deploy.
+> No internet or API keys? See **[Run offline](#run-offline-no-network--no-api-keys)** below —
+> the whole demo runs with stubbed LLM + web-search calls.
 
-### 2. Launch the app
-
-Run the Restate Server in one terminal:
+### 2. Start the Restate Server (flow control enabled)
+Flow control (scoped concurrency limits) is opt-in and only enables on a **fresh** server. It
+also needs a **recent** server build — the `scope` feature requires invocation protocol **v7**.
+An older server fails the model calls with *"Feature 'scope' is not supported by the negotiated
+protocol version …v6…"*; pull the latest image to be safe:
 
 ```bash
+docker pull docker.restate.dev/restatedev/restate:latest
 docker run -p 8080:8080 -p 9070:9070 -p 9071:9071 \
---add-host=host.docker.internal:host-gateway \
-docker.restate.dev/restatedev/restate:latest
+  --add-host=host.docker.internal:host-gateway \
+  -e RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true \
+  docker.restate.dev/restatedev/restate:latest
 ```
 
-Pick an implementation and run it in another terminal:
+> On an older server you can't upgrade? Run the app with `FLOW_CONTROL=0` — model calls then
+> skip the scope, so everything works except the concurrency-cap beat (the gateway's policy and
+> the governed service hop still run).
 
+### 3. Run the app and register it
 ```bash
-uv run app
-
-# — or — manual litellm loop
 uv run app_litellm
 ```
+In the UI (`http://localhost:9070`) register the deployment at `http://host.docker.internal:9080`.
+You should see `Controller`, `DeepResearchAgent`, `ResearchAgent`, and `LLMGateway`.
 
-Register with Restate. Go to the UI at `localhost:9070` and register the
-service deployment at `http://host.docker.internal:9080`.
-
-The UI then shows all the services that were registered:
-
-![overview services](docs/img/overview-ui.png)
-
-### 3. Invoke
-
+### 4. Drive it
 ```bash
-# Trigger an autonomous daily news+deep-research loop for session "C123" on a topic
-curl localhost:8080/DeepResearchAgent/C123/scan_news/send --json '"AI"'
+# Start a research run for session "demo"
+curl localhost:8080/Controller/demo/message --json '"What is new in AI agents?"'
 
-# Ad-hoc research call on the same session (uses any news already in history)
-curl localhost:8080/DeepResearchAgent/C123/research --json '"Tell me more about the second story"'
+# Approve the plan when it posts (copy the awakeable curl from the service log):
+curl localhost:8080/restate/awakeables/<awk_id>/resolve --json '{"approved": true}'
+
+# While it runs, send a follow-up — the classifier picks steer / interrupt / enqueue:
+curl localhost:8080/Controller/demo/message --json '"actually, focus only on coding agents"'   # steer
+curl localhost:8080/Controller/demo/message --json '"forget that — research AI policy instead"' # interrupt
 ```
 
-When the planner posts a plan, copy the Approve / Reject curl from the
-service log — it resolves the awakeable directly via Restate's ingress:
-
+### 5. Demo the flow control
 ```bash
-curl http://localhost:8080/restate/awakeables/<awk_id>/resolve --json '{"approved": true}'
+# Cap concurrent model calls across the org, then fire a swarm of runs
+restate rules set llm --concurrency 3
+scripts/swarm.sh 12
+
+# Watch only 3 LLMGateway/complete invocations run at a time (rest queued) in the UI,
+# or query the system tables:
+#   SELECT * FROM sys_user_limits;   SELECT * FROM sys_vqueues;
 ```
 
-To stop the daily loop, cancel the pending invocation in the Restate UI
-(`http://localhost:9070`).
+### Other knobs
+- **Resilience:** set `FAILURE_PROBABILITY = 0.2` in `app_litellm/utils/tools.py` to make Tavily
+  flaky — the UI shows a tool step failing and retrying to a journaled success.
+- **Policy:** point a request at a model outside `APPROVED_MODELS` to see the gateway refuse it
+  without a provider call.
+- **Autonomous mode:** `curl localhost:8080/DeepResearchAgent/demo/scan_news --json '"AI"'`
+  posts a daily news digest and self-schedules tomorrow's run (no cron).
+
+## Run offline (no network / no API keys)
+
+For rehearsing the demo with no internet (e.g. on a plane), `OFFLINE=1` stubs every LLM and
+web-search call with canned, **schema-valid** responses. The full demo runs unchanged — fan-out,
+steer / interrupt / enqueue, flow control, retries, sessions — because the only thing that goes
+out to the network (the model + Tavily) is replaced; all the Restate behavior is local anyway.
+
+What the stub does:
+- **Drives the loop like a real model would** — researchers emit a `web_search` tool call on the
+  first turn, then a final structured answer, so the fan-out and durable tool steps still appear
+  in the UI.
+- **Deterministic steering** — the classifier picks the path from keywords in your message:
+  *"also / focus / add / include / emphasize"* → **steer**, *"forget / instead / stop / different"*
+  → **interrupt**, anything else → **enqueue**. So each beat is reproducible on stage.
+- **Stays visible** — a per-call delay (`STUB_DELAY`, default `2` seconds) keeps the parallel
+  researchers, the flow-control queue, and the interrupt window observable. Lower it for a faster
+  rehearsal, raise it for a longer interrupt window.
+- **Retries still work** — `FAILURE_PROBABILITY` in `app_litellm/utils/tools.py` makes the stubbed
+  search flaky too, so the retry-to-journaled-success visual works offline.
+
+**Prerequisite:** the Restate server runs in Docker, so pull the image *before* you go offline:
+
+```bash
+docker pull docker.restate.dev/restatedev/restate:latest
+```
+
+Then, fully offline:
+
+```bash
+# 1. Restate server (flow control enabled) — no internet needed once the image is pulled
+docker run -p 8080:8080 -p 9070:9070 -p 9071:9071 \
+  --add-host=host.docker.internal:host-gateway \
+  -e RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true \
+  docker.restate.dev/restatedev/restate:latest
+  
+restate rules set "llm-gateway" --concurrency 100 
+restate rules set "agent/*" --concurrency 3 
+
+# 2. The app in stub mode — no OPENAI_API_KEY / TAVILY_API_KEY required
+OFFLINE=1 uv run app_litellm
+# tune the pacing if you like: OFFLINE=1 STUB_DELAY=4 uv run app_litellm
+# older cached server image (no protocol v7)? skip the scope: FLOW_CONTROL=0 OFFLINE=1 uv run app_litellm
+```
+
+Register `http://host.docker.internal:9080` in the UI (`http://localhost:9070`), then drive it
+with the **exact same** commands as steps 4–5 above (run, steer/interrupt, `restate rules set llm
+--concurrency 3`, `scripts/swarm.sh`). Everything works identically — only the answers are canned.
 
 ## Deploy to production
-
-Ship this as a real bot on Restate Cloud + serverless functions (Modal, Render, Railway, etc.), 
-with Slack as the delivery channel.
+Ship on Restate Cloud (or self-hosted) + serverless functions (Modal, Render, Railway, …), with
+Slack as the delivery channel.
