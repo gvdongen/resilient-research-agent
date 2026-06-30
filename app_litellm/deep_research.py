@@ -8,19 +8,58 @@ The reusable engine — the LLM gateway (policy + flow control) and the durable 
 loop — lives in utils/agent.py. This file is just the workflow, the session state,
 and the controller.
 """
-
+import json
 import restate
 from datetime import timedelta
-
-from utils.agent import FAST_MODEL, TOOL_SPECS, durable_llm_call, run_agent
 from utils.prompts import *
 from utils.schemas import *
-from utils.tools import post_plan, post_report, post_update, to_brief
+from utils.tools import *
 
+MODEL = "gpt-5"
+FAST_MODEL = "gpt-5-mini"
+APPROVED_MODELS = {"gpt-5", "gpt-5-mini"}
 CANCELLATION = 409
+MAX_TURNS = 2
+
+# ----------- LLM Gateway — policy + flow control ---------------------
+
+llm_gateway = restate.Service("LLMGateway")
+
+
+@llm_gateway.handler()
+async def call_llm(ctx: restate.Context, req: LLMRequest) -> dict:
+    # 1. policy guardrail
+    if req.model not in APPROVED_MODELS:
+        raise restate.TerminalError(
+            f"Model '{req.model}' is not on the approved list {sorted(APPROVED_MODELS)}"
+        )
+
+    # 2. call LLM
+    response = await ctx.run_typed("provider", provider_call, req=req)
+    return response["choices"][0]["message"]
 
 
 # ----------- Researcher — one subtopic, in parallel ---------------------
+
+
+async def web_search_fn(query: str, time_range: Range = "month") -> dict:
+    """Search the web. time_range is one of: day, week, month, year."""
+    return call_websearch_api(query=query, range=time_range)
+
+web_search = to_tool(web_search_fn)
+
+async def extract_urls_fn(urls: list[str]) -> dict:
+    """Return the full readable text of a list of web pages."""
+    return await call_extract_api(urls=urls)
+
+extract_urls = to_tool(extract_urls_fn)
+
+
+async def crawl_site_fn(url: str, instructions: str = "") -> dict:
+    """Crawl a website (guided by natural-language instructions) and return content from up to 10 pages."""
+    return call_crawl_api(url=url, instructions=instructions)
+
+crawl_site = to_tool(crawl_site_fn)
 
 research_agent = restate.Service("ResearchAgent")
 
@@ -31,14 +70,38 @@ class Topic(BaseModel):
 
 
 @research_agent.handler()
-async def investigate(ctx: restate.Context, topic: Topic) -> SubReport:
-    return await run_agent(
-        ctx,
-        prompt=RESEARCHER_SYSTEM,
-        messages=[{"role": "user", "content": f"Topic: {topic}"}],
-        output=SubReport,
-        tools=TOOL_SPECS,
-    )
+async def investigate(ctx: restate.Context, topic: Topic) -> dict:
+    msgs = [{"role": "user", "content": topic}]
+    for _ in range(MAX_TURNS):
+        investigation_request = LLMRequest(prompt=RESEARCHER, msgs=msgs, output=SubReport, tools=[web_search, extract_urls, crawl_site])
+        response = await ctx.scope(topic.session).service_call(call_llm, arg=investigation_request)
+        msgs.append(response)
+
+        tool_calls = response.get("tool_calls") or []
+        if not tool_calls:
+            return response["content"]
+
+        # Durable parallel tool calls
+        handles = []
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            args = json.loads(tc["function"]["arguments"])
+            match name:
+                case "web_search":
+                    handles.append(ctx.run_typed(name, web_search_fn, **args))
+                case "extract_urls":
+                    handles.append(ctx.run_typed(name, extract_urls_fn, **args))
+                case "crawl_site":
+                    handles.append(ctx.run_typed(name, crawl_site_fn, **args))
+        await restate.gather(*handles)
+        for tc, h in zip(tool_calls, handles):
+            msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": str(await h)})
+
+    # Budget exhausted — force a final structured answer with no more tools
+    msgs.append({"role": "user", "content": "Turn budget exhausted. Return the result now with what you have."})
+    investigation_request = LLMRequest(prompt=RESEARCHER, msgs=msgs, output=SubReport)
+    response = await ctx.scope(topic.session).service_call(call_llm, arg=investigation_request)
+    return response["content"]
 
 
 # ----------- The deep-research workflow ---------------------
@@ -51,10 +114,11 @@ async def research(ctx: restate.ObjectContext, history: ChatHistory):
     session = ctx.key()
 
     try:
-        # 1 — plan
-        plan: Plan = await run_agent(ctx, prompt=PLANNER, messages=history.messages, output=Plan)
-
         while True:
+            # 1 — plan
+            plan_request = LLMRequest(prompt=PLANNER, msgs=history.messages, output=Plan)
+            plan = await ctx.scope(session).service_call(call_llm, arg=plan_request)
+
             # 2 — human approval: suspends with no compute held until the button is clicked
             awk_id, decision = ctx.awakeable(type_hint=Decision)
             await ctx.run_typed("slack-plan", post_plan, channel=session, plan=plan, awk_id=awk_id)
@@ -75,15 +139,17 @@ async def research(ctx: restate.ObjectContext, history: ChatHistory):
                     break
 
         # 4 — synthesize and deliver
-        report = await run_agent(ctx, prompt=WRITER, messages=[{"role": "user", "content": brief}], output=Report)
+        write_request = LLMRequest(prompt=WRITER, msgs=[{"role": "user", "content": brief}], output=Report)
+        report = await ctx.scope(session).service_call(call_llm, arg=write_request)
+
         await ctx.run_typed("slack-report", post_report, channel=session, report=report)
 
     except restate.TerminalError as e:
         if e.status_code == CANCELLATION:
             text="⏹️ Stopped this research — starting over on your new request."
-            await ctx.run_typed("slack-update", post_update, channel=ctx.key(), text=text)
+            await ctx.run_typed("slack-update", post_update, channel=session, text=text)
         raise
-    ctx.object_send(done, key=ctx.key(), arg={"inv_id": ctx.request().id, "message": report.model_dump_json()})
+    ctx.object_send(done, key=session, arg={"inv_id": ctx.request().id, "message": report.model_dump_json()})
 
 
 # ----------- Controller — steer / interrupt / enqueue ---------------------
@@ -100,9 +166,9 @@ async def message(ctx: restate.ObjectContext, text: str) -> None:
 
     if current is not None:
         message={"role": "user", "content": f"Current goal: {history.messages[-3:]} - New message:\n{text}"}
-        decision = await durable_llm_call(
-            ctx, model=FAST_MODEL, instructions=CLASSIFIER, messages=[message], output=StrategyChoice,
-        )
+        write_request = LLMRequest(model=FAST_MODEL, prompt=CLASSIFIER, msgs=[message], output=Strategy)
+        decision = await ctx.scope(ctx.key()).service_call(call_llm, arg=write_request)
+
         match decision['strategy']:
             case "interrupt":
                 ctx.cancel_invocation(current)  # cancels the run AND its whole fan-out

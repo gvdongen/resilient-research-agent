@@ -23,7 +23,7 @@ from .schemas import (
     SubReport,
     Plan,
     Section,
-    StrategyChoice,
+    Strategy,
 )
 
 STUB_DELAY = float(os.environ.get("STUB_DELAY", "2"))
@@ -151,7 +151,7 @@ def stub_content(name: str, messages: list[dict]) -> str:
             ],
         ).model_dump_json()
     if name == "StrategyChoice":
-        return StrategyChoice(strategy=stub_strategy(messages), reason="[stub] keyword heuristic").model_dump_json()
+        return Strategy(strategy=stub_strategy(messages), reason="[stub] keyword heuristic").model_dump_json()
     return "{}"
 
 
@@ -160,7 +160,7 @@ async def stub_provider(req: LLMRequest) -> dict:
     # Delay so parallel researchers, the concurrency cap, and the interrupt window are visible.
     await asyncio.sleep(random.uniform(STUB_DELAY * 0.5, STUB_DELAY * 15))
     name = (req.output or {}).get("json_schema", {}).get("name", "")
-    already_searched = any(m.get("role") == "tool" for m in req.messages)
+    already_searched = any(m.get("role") == "tool" for m in req.msgs)
     if req.tools and not already_searched:
         message = {
             "role": "assistant",
@@ -170,11 +170,11 @@ async def stub_provider(req: LLMRequest) -> dict:
                     "type": "function",
                     "function": {
                         "name": "web_search",
-                        "arguments": json.dumps({"query": last_topic(req.messages)}),
+                        "arguments": json.dumps({"query": last_topic(req.msgs)}),
                     },
                 }
             ],
         }
     else:
-        message = {"role": "assistant", "content": stub_content(name, req.messages)}
+        message = {"role": "assistant", "content": stub_content(name, req.msgs)}
     return {"choices": [{"message": message}]}

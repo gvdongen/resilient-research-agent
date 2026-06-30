@@ -4,8 +4,7 @@ Run with: `uv run app_litellm`
 """
 
 import restate
-from deep_research import controller, deep_research_agent, research_agent
-from utils.agent import llm_gateway
+from deep_research import controller, deep_research_agent, research_agent, llm_gateway
 
 app = restate.app([controller, deep_research_agent, research_agent, llm_gateway])
 

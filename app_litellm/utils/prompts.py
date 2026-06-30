@@ -2,7 +2,7 @@
 controller's message classifier. Kept out of deep_research.py so the app file
 stays focused on the workflow and the controller."""
 
-RESEARCHER_SYSTEM = """You have web_search, extract_urls,
+RESEARCHER = """You have web_search, extract_urls,
 and crawl_site available. Investigate the assigned subtopic thoroughly:
 search 3-5 topics with recency-appropriate time_range, then read the most
 promising sources in full. Keep the loop tight — at most 2 rounds of

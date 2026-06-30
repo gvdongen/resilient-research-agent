@@ -7,7 +7,7 @@ LangChain `AnyMessage` instances.
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---- Chat ------------------------------------------------------------------
 
@@ -26,16 +26,35 @@ class LLMRequest(BaseModel):
     policy-checked (model allow-list) and flow-controlled (scope concurrency).
     Everything is plain JSON so it crosses the service-call boundary cleanly."""
 
-    model: str
-    messages: list[dict]
+    model: str = "gpt-4o-mini"
+    prompt: str | None = None
+    msgs: list[dict]
     tools: list[dict] | None = None
     output: dict | None = None
+
+    @field_validator("output", mode="before")
+    @classmethod
+    def _coerce_output(cls, v):
+        """Accept a pydantic model class and turn it into OpenAI strict
+        json_schema. Strict json_schema requires `extra="forbid"` and no
+        defaults, which our output models declare. A dict passes through
+        unchanged (e.g. after deserialization across the service boundary)."""
+        if isinstance(v, type) and issubclass(v, BaseModel):
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": v.__name__,
+                    "schema": v.model_json_schema(),
+                    "strict": True,
+                },
+            }
+        return v
 
 
 # ---- Controller ------------------------------------------------------------
 
 
-class StrategyChoice(BaseModel):
+class Strategy(BaseModel):
     """How to handle a message that arrives while a run is already in flight."""
 
     model_config = ConfigDict(extra="forbid")

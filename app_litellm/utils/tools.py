@@ -7,6 +7,7 @@ import random
 from typing import Literal
 
 from litellm import acompletion
+from litellm.utils import function_to_dict
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -118,13 +119,13 @@ def post_update(channel: str, text: str) -> str:
     return ts
 
 
-def to_brief(plan: Plan, sub_reports: list[SubReport]) -> str:
+def to_brief(plan: dict, sub_reports: list[dict]) -> str:
     return (
-        f"# Topic\n{plan.topic}\n\n"
-        f"# Plan rationale\n{plan.rationale}\n\n"
+        f"# Topic\n{plan['topic']}\n\n"
+        f"# Plan rationale\n{plan['rationale']}\n\n"
         "# Researcher findings\n\n"
         + "\n\n".join(
-            f"## {sr.subtopic}\n{sr.findings}\n\nSources: {', '.join(sr.sources)}"
+            f"## {sr['subtopic']}\n{sr['findings']}\n\nSources: {', '.join(sr['sources'])}"
             for sr in sub_reports
         )
     )
@@ -320,7 +321,7 @@ async def provider_call(req: LLMRequest) -> dict:
         return await stub_provider(req)  # canned responses live in utils/stubs.py
     response = await acompletion(
         model=req.model,
-        messages=req.messages,
+        messages=req.msgs,
         tools=req.tools,
         response_format=req.output,
     )
@@ -328,14 +329,7 @@ async def provider_call(req: LLMRequest) -> dict:
     return response.model_dump(exclude_none=True)
 
 
-def to_schema(output_model) -> dict:
-    """OpenAI strict json_schema format from a pydantic model. Our models use
-    `extra="forbid"` and have no defaults, which strict json_schema requires."""
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": output_model.__name__,
-            "schema": output_model.model_json_schema(),
-            "strict": True,
-        },
-    }
+def to_tool(fn) -> dict:
+    """Wrap a plain async function as an OpenAI-style tool definition, deriving
+    name/description/parameters from its signature and docstring."""
+    return {"type": "function", "function": function_to_dict(fn)}
