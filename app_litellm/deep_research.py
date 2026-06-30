@@ -1,13 +1,3 @@
-"""Deep Research agent — the application.
-
-A planner → parallel researchers → writer workflow, wrapped in a Controller that can
-steer / interrupt / enqueue a run that is already in flight. Interrupt cancels the run
-and its whole fan-out of researchers in one durable signal, then rolls forward.
-
-The reusable engine — the LLM gateway (policy + flow control) and the durable tool
-loop — lives in utils/agent.py. This file is just the workflow, the session state,
-and the controller.
-"""
 import json
 import restate
 from datetime import timedelta
@@ -16,10 +6,9 @@ from utils.schemas import *
 from utils.tools import *
 
 MODEL = "gpt-5"
-FAST_MODEL = "gpt-5-mini"
-APPROVED_MODELS = {"gpt-5", "gpt-5-mini"}
+FAST_MODEL = "gpt-4o-mini"
+APPROVED_MODELS = {"gpt-5", "gpt-5-mini", "gpt-4o-mini", "gpt-4o"}
 CANCELLATION = 409
-MAX_TURNS = 2
 
 # ----------- LLM Gateway — policy + flow control ---------------------
 
@@ -64,16 +53,11 @@ crawl_site = to_tool(crawl_site_fn)
 research_agent = restate.Service("ResearchAgent")
 
 
-class Topic(BaseModel):
-    session: str
-    topic: str
-
-
 @research_agent.handler()
 async def investigate(ctx: restate.Context, topic: Topic) -> dict:
-    msgs = [{"role": "user", "content": topic}]
-    for _ in range(MAX_TURNS):
-        investigation_request = LLMRequest(prompt=RESEARCHER, msgs=msgs, output=SubReport, tools=[web_search, extract_urls, crawl_site])
+    msgs = [{"role": "user", "content": f"Topic: {topic.topic}"}]
+    while True:
+        investigation_request = LLMRequest(prompt=RESEARCHER, msgs=msgs, tools=[web_search, extract_urls, crawl_site], output=SubReport)
         response = await ctx.scope(topic.session).service_call(call_llm, arg=investigation_request)
         msgs.append(response)
 
@@ -88,7 +72,8 @@ async def investigate(ctx: restate.Context, topic: Topic) -> dict:
             args = json.loads(tc["function"]["arguments"])
             match name:
                 case "web_search":
-                    handles.append(ctx.run_typed(name, web_search_fn, **args))
+                    promise = ctx.run_typed(name, web_search_fn, **args)
+                    handles.append(promise)
                 case "extract_urls":
                     handles.append(ctx.run_typed(name, extract_urls_fn, **args))
                 case "crawl_site":
@@ -97,11 +82,6 @@ async def investigate(ctx: restate.Context, topic: Topic) -> dict:
         for tc, h in zip(tool_calls, handles):
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": str(await h)})
 
-    # Budget exhausted — force a final structured answer with no more tools
-    msgs.append({"role": "user", "content": "Turn budget exhausted. Return the result now with what you have."})
-    investigation_request = LLMRequest(prompt=RESEARCHER, msgs=msgs, output=SubReport)
-    response = await ctx.scope(topic.session).service_call(call_llm, arg=investigation_request)
-    return response["content"]
 
 
 # ----------- The deep-research workflow ---------------------
@@ -117,39 +97,39 @@ async def research(ctx: restate.ObjectContext, history: ChatHistory):
         while True:
             # 1 — plan
             plan_request = LLMRequest(prompt=PLANNER, msgs=history.messages, output=Plan)
-            plan = await ctx.scope(session).service_call(call_llm, arg=plan_request)
+            response = await ctx.scope(session).service_call(call_llm, arg=plan_request)
+            plan = Plan(**response["content"])
 
-            # 2 — human approval: suspends with no compute held until the button is clicked
+            # 2 — human approval
             awk_id, decision = ctx.awakeable(type_hint=Decision)
-            await ctx.run_typed("slack-plan", post_plan, channel=session, plan=plan, awk_id=awk_id)
+            ctx.object_send(update_slack, key=session, arg={"text": format_plan(plan), "awk_id": awk_id})
             if not (await decision).approved:
                 return
 
             # 3 — fan out one researcher per subtopic. Cancelling this run cancels them all.
-            handles = [ctx.service_call(investigate, arg=Topic(session=session, topic=sub)) for sub in plan.subtopics]
+            handles = [ctx.service_call(investigate, arg=Topic(session=session, topic=sub)) for sub in plan["subtopics"]]
             await restate.gather(*handles)
-            sub_reports = [await h for h in handles]
+            sub_reports = [json.loads(await h) for h in handles]
 
             # 4 — check for steering updates
             brief = to_brief(plan, sub_reports)
             match await restate.select(steer=ctx.signal("steer", type_hint=str), now=ctx.sleep(timedelta(0))):
-                case ["steer", update]:
-                    brief += f"\n# Steering update from the user — incorporate this\n{update}"
+                case ["steer", steer_update]:
+                    brief += f"\n# Steering update from the user — incorporate this\n{steer_update}"
                 case _:
                     break
 
-        # 4 — synthesize and deliver
+        # 5 — synthesize, then report back to the session object, which delivers it
         write_request = LLMRequest(prompt=WRITER, msgs=[{"role": "user", "content": brief}], output=Report)
-        report = await ctx.scope(session).service_call(call_llm, arg=write_request)
-
-        await ctx.run_typed("slack-report", post_report, channel=session, report=report)
+        response = (await ctx.scope(session).service_call(call_llm, arg=write_request))
+        report = Report(**response["content"])
 
     except restate.TerminalError as e:
         if e.status_code == CANCELLATION:
-            text="⏹️ Stopped this research — starting over on your new request."
-            await ctx.run_typed("slack-update", post_update, channel=session, text=text)
+            text = "⏹️ Stopped this research — starting over on your new request."
+            ctx.object_send(update_slack, key=session, arg={"text": text})
         raise
-    ctx.object_send(done, key=session, arg={"inv_id": ctx.request().id, "message": report.model_dump_json()})
+    ctx.object_send(update_slack, key=session, arg={"text": format_report(report), "inv_id": ctx.request().id})
 
 
 # ----------- Controller — steer / interrupt / enqueue ---------------------
@@ -167,7 +147,7 @@ async def message(ctx: restate.ObjectContext, text: str) -> None:
     if current is not None:
         message={"role": "user", "content": f"Current goal: {history.messages[-3:]} - New message:\n{text}"}
         write_request = LLMRequest(model=FAST_MODEL, prompt=CLASSIFIER, msgs=[message], output=Strategy)
-        decision = await ctx.scope(ctx.key()).service_call(call_llm, arg=write_request)
+        decision = json.loads((await ctx.scope(ctx.key()).service_call(call_llm, arg=write_request))["content"])
 
         match decision['strategy']:
             case "interrupt":
@@ -181,11 +161,12 @@ async def message(ctx: restate.ObjectContext, text: str) -> None:
 
 
 @controller.handler()
-async def done(ctx: restate.ObjectContext, payload: dict) -> None:
-    """Called by a run when it finishes. Record the reply."""
+async def update_slack(ctx: restate.ObjectContext, msg: dict) -> None:
     history = await ctx.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(payload["message"])
+    history.messages.append({"role": "assistant", "content": msg["text"]})
     ctx.set("messages", history)
-    # clear the pointer if this is still the run we track (a newer enqueue/interrupt run may have replaced it(
-    if await ctx.get("current", type_hint=str) == payload["inv_id"]:
+
+    await ctx.run_typed("slack", post_to_slack, channel=ctx.key(), text=msg["text"], awk_id=msg.get("awk_id"))
+
+    if "inv_id" in msg and await ctx.get("current", type_hint=str) == msg["inv_id"]:
         ctx.clear("current")

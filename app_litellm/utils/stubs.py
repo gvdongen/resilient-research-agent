@@ -91,8 +91,9 @@ def stub_strategy(messages: list[dict]) -> str:
 def stub_content(name: str, messages: list[dict]) -> str:
     """Canned, schema-valid JSON for the requested response model."""
     topic = last_topic(messages)
-    if name == "ResearchPlan":
+    if name == "Plan":
         return Plan(
+            topic="What's new in AI agents",
             rationale=(
                 "AI agents crossed from demos into production over the past year. The most "
                 "consequential threads are how agents write software, how they connect to tools, "
@@ -100,7 +101,7 @@ def stub_content(name: str, messages: list[dict]) -> str:
             ),
             subtopics=list(_AI_FINDINGS),
         ).model_dump_json()
-    if name == "Report":
+    if name == "SubReport":
         findings, sources = _AI_FINDINGS.get(
             topic,
             (
@@ -110,7 +111,7 @@ def stub_content(name: str, messages: list[dict]) -> str:
             ),
         )
         return SubReport(subtopic=topic, findings=findings, sources=sources).model_dump_json()
-    if name == "FinalReport":
+    if name == "Report":
         return Report(
             headline="What's new in AI agents (mid-2026)",
             executive_summary=(
@@ -150,7 +151,7 @@ def stub_content(name: str, messages: list[dict]) -> str:
                 ),
             ],
         ).model_dump_json()
-    if name == "StrategyChoice":
+    if name == "Strategy":
         return Strategy(strategy=stub_strategy(messages), reason="[stub] keyword heuristic").model_dump_json()
     return "{}"
 

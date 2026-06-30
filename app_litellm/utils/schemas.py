@@ -90,6 +90,11 @@ class Decision(BaseModel):
 # ---- Researchers -----------------------------------------------------------
 
 
+class Topic(BaseModel):
+    session: str
+    topic: str
+
+
 class SubReport(BaseModel):
     """One researcher's findings for a single subtopic."""
 
