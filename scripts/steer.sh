@@ -16,6 +16,6 @@ curl -s "$INGRESS/Controller/$SESSION/message" --json '"What is AI"' >/dev/null
 sleep 5
 
 echo "[$SESSION] sending: Answer as a poem"
-curl -s "$INGRESS/Controller/$SESSION/message" --json '"Answer as a poem"' >/dev/null
+curl -s "$INGRESS/Controller/$SESSION/message" --json '"Write your research report as a poem"' >/dev/null
 
 echo "Done. Watch the run in the Restate UI (http://localhost:9070)."

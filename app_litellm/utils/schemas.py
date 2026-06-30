@@ -53,7 +53,7 @@ class LLMRequest(BaseModel):
 class Strategy(BaseModel):
     """How to handle a message that arrives while a run is already in flight."""
     model_config = ConfigDict(extra="forbid")
-    cancel: Literal["cancel", "steer"]
+    strategy: Literal["cancel", "steer"]
 
 
 # ---- Planner ---------------------------------------------------------------

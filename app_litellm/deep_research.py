@@ -43,7 +43,7 @@ async def call_llm(ctx: rst.Context, req: LLMRequest) -> dict:
 # ctx.run_typed via restate_context(), so retries/replays are journaled.
 
 @tool
-async def web_search(queries: list[str], time_range: Range = "month") -> list[dict]:
+async def web_search(queries: list[str], time_range: Range = "month") -> list[str]:
     """Search the web with a list of queries. time_range is one of: day, week, month, year."""
     searches = [
         restate_context().run_typed(f"web_search:{q}", call_websearch_api, query=q, range=time_range)
@@ -53,29 +53,14 @@ async def web_search(queries: list[str], time_range: Range = "month") -> list[di
     return [await s for s in searches]
 
 
-@tool
-async def extract_urls(urls: list[str]) -> dict:
-    """Return the full readable text of a list of web pages."""
-    return await restate_context().run_typed("extract_urls", call_extract_api, urls=urls)
-
-
-@tool
-async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
-    """Crawl a website (guided by natural-language instructions) and return content from up to 10 pages."""
-    crawls = [
-        restate_context().run_typed(f"crawl_site:{u}", call_crawl_api, url=u, instructions=instructions)
-        for u in urls
-    ]
-    await rst.gather(*crawls)
-    return [await c for c in crawls]
-
-
 researcher = create_agent(
     model="openai:" + MODEL,
-    tools=[web_search, extract_urls, crawl_sites],
+    tools=[web_search],
     system_prompt=RESEARCHER,
     response_format=SubReport,
-    middleware=[RestateMiddleware(call_llm=call_llm, department=department, model=MODEL)],
+    middleware=[
+        RestateMiddleware(call_llm=call_llm, department=department, model=MODEL),
+    ],
 )
 
 research_agent = rst.Service("ResearchAgent")
@@ -102,29 +87,34 @@ async def research(restate: ObjectContext, history: ChatHistory):
         plan_request = LLMRequest(prompt=PLANNER, msgs=history.messages, output_schema=Plan)
         plan = json.loads((await restate.scope(department).service_call(call_llm, arg=plan_request))["content"])
 
-        # 2 — human approval
+        # 2 - human approval
         awk_id, decision = restate.awakeable(type_hint=Decision)
         restate.object_send(update_slack, key=session, arg={"text": format_plan(plan), "awk_id": awk_id})
         if not (await decision).approved:
             return
 
-        # 3 — fan out one researcher per subtopic
-        subresearch = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
-        await rst.gather(*subresearch)
-        sub_reports = [await h for h in subresearch]
+        # 2 — research
+        sub_reports = []
+        if plan["subtopics"]:
+            handles = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
+            await rst.gather(*handles)
+            sub_reports = [await h for h in handles]  # keep findings across steers
 
-        # 4 — synthesize
-        brief = to_brief(plan, sub_reports)
-        write_request = LLMRequest(prompt=WRITER, msgs=[{"role": "user", "content": brief}], output_schema=Report)
-        report = await restate.scope(department).service_call(call_llm, arg=write_request)
-
-        # 5 - check for new user input
+        # 3 - steer
         if text := await peek(restate.signal("steer", type_hint=str)):
-            append(history, text)
+            append(history, plan, sub_reports, text)
             continue
+
+        # 4 — write
+        brief = to_brief(plan, sub_reports)
+        write_request = LLMRequest(prompt=WRITER, msgs=history.messages + [{"role": "user", "content": brief}], output_schema=Report)
+        draft = await restate.scope(department).service_call(call_llm, arg=write_request)
+        report = format_report(draft)
         break
 
-    restate.object_send(update_slack, key=session, arg={"text": format_report(report), "inv_id": restate.request().id})
+
+
+    restate.object_send(update_slack, key=session, arg={"text": report, "inv_id": restate.request().id})
 
 
 # ----------- Controller — steer / interrupt / enqueue ---------------------
@@ -144,9 +134,9 @@ async def message(ctx: rst.ObjectContext, text: str) -> None:
         write_request = LLMRequest(model=FAST_MODEL, prompt=CLASSIFIER, msgs=[message], output_schema=Strategy)
         decision = json.loads((await ctx.scope(ctx.key()).service_call(call_llm, arg=write_request))["content"])
 
-        match decision['cancel']:
+        match decision['strategy']:
             case "cancel":
-                ctx.cancel_invocation(current)  # cancels the run AND its whole fan-out
+                ctx.cancel_invocation(current)
             case _:
                 ctx.resolve_signal(current, "steer", text)
                 return

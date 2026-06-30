@@ -5,10 +5,11 @@ markdown — or just logs it when there's no SLACK_BOT_TOKEN (the demo's default
 The session object formats each kind of update and calls it; nothing else writes
 to Slack."""
 
+import json
 import logging
 import os
 import random
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 from litellm import acompletion
 from litellm.utils import function_to_dict
@@ -17,7 +18,7 @@ from restate.server_context import ServerDurableFuture
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from .schemas import LLMRequest, Plan
+from .schemas import LLMRequest, Plan, ChatHistory
 from .stubs import stub_provider
 
 T = TypeVar("T")
@@ -25,6 +26,20 @@ T = TypeVar("T")
 Range = Literal["day", "week", "month", "year"]
 
 RESTATE_HOST = os.environ.get("RESTATE_CLOUD_INGRESS") or "http://localhost:8080"
+
+# Max characters of any single tool result that reaches the model. Tavily
+# extract/crawl return full page text, which can be hundreds of thousands of
+# tokens; clipping each source here keeps one tool message from blowing the
+# context window (the SummarizationMiddleware handles cross-message growth).
+MAX_TOOL_CHARS = int(os.environ.get("MAX_TOOL_CHARS", "4000"))
+
+
+def cap(result: Any, limit: int = MAX_TOOL_CHARS) -> str:
+    """Serialize a tool result and clip it to `limit` chars, keeping the head."""
+    text = result if isinstance(result, str) else json.dumps(result, default=str)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n…[truncated {len(text) - limit} chars]"
 
 # ----------- Tavily Tools ---------------------
 
@@ -48,45 +63,45 @@ def _stub_result(query: str) -> dict:
     }
 
 
-def call_websearch_api(query: str, range: Range) -> dict:
+def call_websearch_api(query: str, range: Range) -> str:
     if random.random() < FAILURE_PROBABILITY:
         import time
 
         time.sleep(random.uniform(0, 2))
         raise Exception("Tavily API down")
     if OFFLINE:
-        return {"query": query, "result": _stub_result(query)}
+        return cap({"query": query, "result": _stub_result(query)})
     try:
         result = tavily_client.search(
-            query=query, time_range=range, search_depth="advanced"
+            query=query, time_range=range, search_depth="fast"
         )
     except BadRequestError as e:
         # Non-transient: malformed request so propagate back to LLM
         result = f"BadRequestError: {str(e)}\n\nTry a different query."
-    return {"query": query, "result": result}
+    return cap({"query": query, "result": result})
 
 
-async def call_extract_api(urls: list[str]) -> dict:
+async def call_extract_api(urls: list[str]) -> str:
     if random.random() < FAILURE_PROBABILITY:
         raise Exception("Tavily API down")
     if OFFLINE:
-        return _stub_result(", ".join(urls))
+        return cap(_stub_result(", ".join(urls)))
     try:
-        return tavily_client.extract(urls=urls, extract_depth="advanced")
+        return cap(tavily_client.extract(urls=urls, extract_depth="basic"))
     except BadRequestError as e:
         # Non-transient: malformed request so propagate back to LLM
-        return {"result": f"BadRequestError: {str(e)}\n\nTry a different query."}
+        return cap({"result": f"BadRequestError: {str(e)}\n\nTry a different query."})
 
 
-def call_crawl_api(url: str, instructions: str = "") -> dict:
+def call_crawl_api(url: str, instructions: str = "") -> str:
     if OFFLINE:
-        return {"url": url, "result": _stub_result(url)}
+        return cap({"url": url, "result": _stub_result(url)})
     try:
-        result = tavily_client.crawl(url=url, instructions=instructions)
+        result = tavily_client.crawl(url=url, instructions=instructions, extract_depth="basic")
     except BadRequestError as e:
         # Non-transient: malformed request so propagate back to LLM
         result = f"BadRequestError: {str(e)}\n\nTry a different query."
-    return {"url": url, "result": result}
+    return cap({"url": url, "result": result})
 
 
 # ---- Slack delivery ----------------------------------------------------------
@@ -101,7 +116,8 @@ def format_plan(plan: dict) -> str:
     return f"*📋 Research plan — needs approval*\n_{plan['rationale']}_\n\n*Subtopics:*\n{subtopics}"
 
 
-def format_report(report: dict) -> str:
+def format_report(draft: dict) -> str:
+    report = json.loads(draft["content"])
     sections = "\n\n".join(f"*{s['heading']}*\n{s['body']}" for s in report["sections"])
     sources = "\n".join(f"• {s}" for s in report["sources"])
     return (
@@ -186,9 +202,12 @@ def to_brief(plan: dict, sub_reports: list[dict]) -> str:
 async def provider_call(req: LLMRequest) -> dict:
     if OFFLINE:
         return await stub_provider(req)  # canned responses live in utils/stubs.py
+    # Prepend the system prompt; without this the planner/writer/classifier never
+    # see their instructions and just lean on the output schema.
+    messages = ([{"role": "system", "content": req.prompt}] if req.prompt else []) + req.msgs
     response = await acompletion(
         model=req.model,
-        messages=req.msgs,
+        messages=messages,
         tools=req.tools,
         response_format=req.output_schema,
     )
@@ -209,5 +228,14 @@ async def peek(fut: RestateDurableFuture[T]) -> T | None:
     return None
 
 
-def append(history: ChatHistory, text: str) -> None:
-    history.messages.append({"role": "user", "content": f"Steering update from the user — incorporate this:\n{text}"})
+def append(history: ChatHistory, plan: dict, sub_reports: list[dict], text: str) -> None:
+    # subtopic -> its findings, so the planner sees what's done and only adds new subtopics.
+    done = {sr["subtopic"]: sr["findings"] for sr in sub_reports}
+    history.messages.append({
+        "role": "assistant",
+        "content": f"Research already completed for '{plan['topic']}' (do not redo these subtopics):\n{json.dumps(done, indent=2)}",
+    })
+    history.messages.append({
+        "role": "user",
+        "content": f"Steering update from the user — incorporate this; only plan NEW research it requires:\n{text}",
+    })
