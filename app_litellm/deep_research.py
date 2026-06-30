@@ -87,25 +87,25 @@ async def research(restate: ObjectContext, history: ChatHistory):
         plan_request = LLMRequest(prompt=PLANNER, msgs=history.messages, output_schema=Plan)
         plan = json.loads((await restate.scope(department).service_call(call_llm, arg=plan_request))["content"])
 
-        # 2 - human approval
-        awk_id, decision = restate.awakeable(type_hint=Decision)
-        restate.object_send(update_slack, key=session, arg={"text": format_plan(plan), "awk_id": awk_id})
-        if not (await decision).approved:
-            return
-
-        # 2 — research
         sub_reports = []
         if plan["subtopics"]:
+            # 2 - human approval
+            awk_id, decision = restate.awakeable(type_hint=Decision)
+            restate.object_send(update_slack, key=session, arg={"text": format_plan(plan), "awk_id": awk_id})
+            if not (await decision).approved:
+                return
+
+            # 3 — research
             handles = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
             await rst.gather(*handles)
             sub_reports = [await h for h in handles]  # keep findings across steers
 
-        # 3 - steer
+        # 4 - steer
         if text := await peek(restate.signal("steer", type_hint=str)):
             append(history, plan, sub_reports, text)
             continue
 
-        # 4 — write
+        # 5 — write
         brief = to_brief(plan, sub_reports)
         write_request = LLMRequest(prompt=WRITER, msgs=history.messages + [{"role": "user", "content": brief}], output_schema=Report)
         draft = await restate.scope(department).service_call(call_llm, arg=write_request)

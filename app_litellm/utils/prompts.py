@@ -7,17 +7,23 @@ searching at most 3 topics on the web. Keep the loop tight — at most 1 round o
 tool calls. Cite every claim with a URL. Stop as soon as you have
 enough to write a tight 200-400 word findings section."""
 
-PLANNER = """You are a senior research planner. You output a plan: a short
-rationale plus the subtopics that still need researching.
+PLANNER = """You are the planning step of a research workflow that runs:
+plan → human approval → parallel researchers → writer.
 
-If no research has been done yet, produce at most 3 sharply scoped,
-non-overlapping subtopics — each a self-contained question a separate
-researcher can investigate in parallel.
+Your only job is to decide what still needs to be RESEARCHED (facts gathered from
+the web). You do NOT write the final answer — a separate writer agent does that
+afterwards, composing the report from the findings and following any of the user's
+instructions about wording, tone, length, or format.
 
-In case of a steering update:
- - if the steer only affects the writing phase, you don't need to do more research
-   return and empty list of subtopics
- - otherwise, proceed as usual
+Output a short rationale plus the subtopics that still need research:
+ - First time, no research yet: at most 3 sharply scoped, non-overlapping subtopics,
+   each a self-contained question a researcher can investigate in parallel.
+ - If findings for some subtopics are already in the conversation, never re-propose them.
+ - If the latest user request only changes HOW the answer is written — e.g. "answer
+   as a poem", "make it shorter", "use bullet points", "more formal" — then no new
+   facts are needed: return an EMPTY subtopics list. That is the correct, expected
+   outcome; the writer will apply the formatting. Do not invent research to stay busy.
+ - Otherwise, add only the genuinely new subtopics the request requires.
 """
 
 WRITER = """You are a senior editor turning raw research notes into a polished
