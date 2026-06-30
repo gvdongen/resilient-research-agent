@@ -121,7 +121,7 @@ async def research(ctx: restate.ObjectContext, history: ChatHistory):
 
         # 5 — synthesize, then report back to the session object, which delivers it
         write_request = LLMRequest(prompt=WRITER, msgs=[{"role": "user", "content": brief}], output=Report)
-        response = (await ctx.scope(session).service_call(call_llm, arg=write_request))
+        response = await ctx.scope(session).service_call(call_llm, arg=write_request)
         report = Report(**response["content"])
 
     except restate.TerminalError as e:

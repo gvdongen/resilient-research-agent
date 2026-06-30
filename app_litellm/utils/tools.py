@@ -15,7 +15,7 @@ from litellm.utils import function_to_dict
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from .schemas import LLMRequest
+from .schemas import LLMRequest, Plan
 from .stubs import stub_provider
 
 Range = Literal["day", "week", "month", "year"]
@@ -164,10 +164,10 @@ def _approval_curl(awk_id: str) -> str:
     )
 
 
-def to_brief(plan: dict, sub_reports: list[dict]) -> str:
+def to_brief(plan: Plan, sub_reports: list[dict]) -> str:
     return (
-        f"# Topic\n{plan['topic']}\n\n"
-        f"# Plan rationale\n{plan['rationale']}\n\n"
+        f"# Topic\n{plan.topic}\n\n"
+        f"# Plan rationale\n{plan.rationale}\n\n"
         "# Researcher findings\n\n"
         + "\n\n".join(
             f"## {sr['subtopic']}\n{sr['findings']}\n\nSources: {', '.join(sr['sources'])}"
