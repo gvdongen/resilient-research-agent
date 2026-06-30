@@ -39,6 +39,7 @@ from restate.ext.turnstile import Turnstile
 
 from restate.ext.langchain._state import get_or_create_state, state_from_ctx
 
+from .config import DEPARTMENT
 from .schemas import LLMRequest
 
 ToolCallResult = ToolMessage | Command
@@ -76,16 +77,9 @@ class RestateMiddleware(AgentMiddleware):
     def __init__(
         self,
         run_options: Optional[RunOptions[Any]] = None,
-        *,
-        call_llm: Optional[Callable[..., Any]] = None,
-        department: Optional[str] = None,
-        model: Optional[str] = None,
     ):
         super().__init__()
         self._options: RunOptions[Any] = run_options or RunOptions()
-        self._call_llm = call_llm
-        self._department = department
-        self._model = model
 
     async def awrap_model_call(
         self,
@@ -148,11 +142,11 @@ class RestateMiddleware(AgentMiddleware):
         tools = [convert_to_openai_tool(t) for t in request.tools] if request.tools else None
         schema = getattr(request.response_format, "schema", None)  # a pydantic class; LLMRequest coerces it
 
-        llm_request = LLMRequest(model=self._model, msgs=msgs, tools=tools, output_schema=schema)
+        llm_request = LLMRequest(model=request.model.name, msgs=msgs, tools=tools, output_schema=schema)
 
         # service_call is itself journaled, so no ctx.run_typed wrapper is needed.
         # Returns response["choices"][0]["message"] — the assistant message dict.
-        message = await ctx.scope(self._department).service_call(self._call_llm, arg=llm_request)
+        message = await ctx.scope(DEPARTMENT).service_call(self._call_llm, arg=llm_request)
 
         ai_message = AIMessage(
             content=message.get("content") or "",
