@@ -1,5 +1,3 @@
-import json
-
 import restate as rst
 from restate import ObjectContext, Context
 from langchain.agents import create_agent
@@ -24,7 +22,7 @@ llm_gateway = rst.Service("LLMGateway")
 
 
 @llm_gateway.handler()
-async def call_llm(ctx: rst.Context, req: LLMRequest) -> dict:
+async def call_llm(restate: Context, req: LLMRequest) -> dict:
     # 1. policy guardrail
     if req.model not in APPROVED_MODELS:
         raise rst.TerminalError(
@@ -32,7 +30,7 @@ async def call_llm(ctx: rst.Context, req: LLMRequest) -> dict:
         )
 
     # 2. call LLM
-    response = await ctx.run_typed("provider", provider_call, req=req)
+    response = await restate.run_typed("provider", provider_call, req=req)
     return response["choices"][0]["message"]
 
 
@@ -67,7 +65,7 @@ research_agent = rst.Service("ResearchAgent")
 
 
 @research_agent.handler()
-async def investigate(ctx: Context, topic: str) -> dict:
+async def investigate(_restate: Context, topic: str) -> dict:
     result = await researcher.ainvoke({"messages": f"Topic: {topic}"})
     return result["structured_response"].model_dump()
 
@@ -87,15 +85,16 @@ async def research(restate: ObjectContext, history: ChatHistory):
         plan_request = LLMRequest(prompt=PLANNER, msgs=history.messages, output_schema=Plan)
         plan = json.loads((await restate.scope(department).service_call(call_llm, arg=plan_request))["content"])
 
+        # 2 — research
         sub_reports = []
         if plan["subtopics"]:
-            # 2 - human approval
+            # 2a - human approval
             awk_id, decision = restate.awakeable(type_hint=Decision)
             restate.object_send(update_slack, key=session, arg={"text": format_plan(plan), "awk_id": awk_id})
             if not (await decision).approved:
                 return
 
-            # 3 — research
+            # 2b - subtopic research
             handles = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
             await rst.gather(*handles)
             sub_reports = [await h for h in handles]  # keep findings across steers
@@ -122,36 +121,36 @@ async def research(restate: ObjectContext, history: ChatHistory):
 controller = rst.VirtualObject("Controller")
 
 @controller.handler()
-async def message(ctx: rst.ObjectContext, text: str) -> None:
-    history = await ctx.get("messages", type_hint=ChatHistory) or ChatHistory()
+async def message(restate: ObjectContext, text: str) -> None:
+    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
     history.messages.append({"role": "user", "content": text})
-    ctx.set("messages", history)
+    restate.set("messages", history)
 
-    current = await ctx.get("current", type_hint=str)
+    current = await restate.get("current", type_hint=str)
 
     if current is not None:
         message={"role": "user", "content": f"Current goal: {history.messages[-3:]} - New message:\n{text}"}
         write_request = LLMRequest(model=FAST_MODEL, prompt=CLASSIFIER, msgs=[message], output_schema=Strategy)
-        decision = json.loads((await ctx.scope(ctx.key()).service_call(call_llm, arg=write_request))["content"])
+        decision = json.loads((await restate.scope(restate.key()).service_call(call_llm, arg=write_request))["content"])
 
         match decision['strategy']:
             case "cancel":
-                ctx.cancel_invocation(current)
+                restate.cancel_invocation(current)
             case _:
-                ctx.resolve_signal(current, "steer", text)
+                restate.resolve_signal(current, "steer", text)
                 return
 
-    handle = ctx.object_send(research, key=ctx.key(), arg=history)
-    ctx.set("current", await handle.invocation_id())
+    handle = restate.object_send(research, key=restate.key(), arg=history)
+    restate.set("current", await handle.invocation_id())
 
 
 @controller.handler()
-async def update_slack(ctx: rst.ObjectContext, msg: dict) -> None:
-    history = await ctx.get("messages", type_hint=ChatHistory) or ChatHistory()
+async def update_slack(restate: ObjectContext, msg: dict) -> None:
+    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
     history.messages.append({"role": "assistant", "content": msg["text"]})
-    ctx.set("messages", history)
+    restate.set("messages", history)
 
-    await ctx.run_typed("slack", post_to_slack, channel=ctx.key(), text=msg["text"], awk_id=msg.get("awk_id"))
+    await restate.run_typed("slack", post_to_slack, channel=restate.key(), text=msg["text"], awk_id=msg.get("awk_id"))
 
-    if "inv_id" in msg and await ctx.get("current", type_hint=str) == msg["inv_id"]:
-        ctx.clear("current")
+    if "inv_id" in msg and await restate.get("current", type_hint=str) == msg["inv_id"]:
+        restate.clear("current")
