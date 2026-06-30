@@ -8,15 +8,19 @@ to Slack."""
 import logging
 import os
 import random
-from typing import Literal
+from typing import Literal, TypeVar
 
 from litellm import acompletion
 from litellm.utils import function_to_dict
+from restate import RestateDurableFuture
+from restate.server_context import ServerDurableFuture
 from tavily import TavilyClient, BadRequestError
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from .schemas import LLMRequest, Plan
 from .stubs import stub_provider
+
+T = TypeVar("T")
 
 Range = Literal["day", "week", "month", "year"]
 
@@ -164,10 +168,10 @@ def _approval_curl(awk_id: str) -> str:
     )
 
 
-def to_brief(plan: Plan, sub_reports: list[dict]) -> str:
+def to_brief(plan: dict, sub_reports: list[dict]) -> str:
     return (
-        f"# Topic\n{plan.topic}\n\n"
-        f"# Plan rationale\n{plan.rationale}\n\n"
+        f"# Topic\n{plan['topic']}\n\n"
+        f"# Plan rationale\n{plan['rationale']}\n\n"
         "# Researcher findings\n\n"
         + "\n\n".join(
             f"## {sr['subtopic']}\n{sr['findings']}\n\nSources: {', '.join(sr['sources'])}"
@@ -186,7 +190,7 @@ async def provider_call(req: LLMRequest) -> dict:
         model=req.model,
         messages=req.msgs,
         tools=req.tools,
-        response_format=req.output,
+        response_format=req.output_schema,
     )
     # exclude_none so the assistant message is clean to append back to the history
     return response.model_dump(exclude_none=True)
@@ -196,3 +200,14 @@ def to_tool(fn) -> dict:
     """Wrap a plain async function as an OpenAI-style tool definition, deriving
     name/description/parameters from its signature and docstring."""
     return {"type": "function", "function": function_to_dict(fn)}
+
+
+async def peek(fut: RestateDurableFuture[T]) -> T | None:
+    assert isinstance(fut, ServerDurableFuture)
+    if fut.is_completed():
+        return await fut
+    return None
+
+
+def append(history: ChatHistory, text: str) -> None:
+    history.messages.append({"role": "user", "content": f"Steering update from the user — incorporate this:\n{text}"})

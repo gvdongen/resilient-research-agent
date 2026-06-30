@@ -22,17 +22,13 @@ class ChatHistory(BaseModel):
 
 
 class LLMRequest(BaseModel):
-    """One model call routed through the LLMGateway service so it can be
-    policy-checked (model allow-list) and flow-controlled (scope concurrency).
-    Everything is plain JSON so it crosses the service-call boundary cleanly."""
-
     model: str = "gpt-4o-mini"
     prompt: str | None = None
     msgs: list[dict]
     tools: list[dict] | None = None
-    output: dict | None = None
+    output_schema: dict | None = None
 
-    @field_validator("output", mode="before")
+    @field_validator("output_schema", mode="before")
     @classmethod
     def _coerce_output(cls, v):
         """Accept a pydantic model class and turn it into OpenAI strict
@@ -56,11 +52,8 @@ class LLMRequest(BaseModel):
 
 class Strategy(BaseModel):
     """How to handle a message that arrives while a run is already in flight."""
-
     model_config = ConfigDict(extra="forbid")
-
-    strategy: Literal["enqueue", "interrupt", "steer"]
-    reason: str
+    cancel: Literal["cancel", "steer"]
 
 
 # ---- Planner ---------------------------------------------------------------
@@ -93,6 +86,13 @@ class Decision(BaseModel):
 class Topic(BaseModel):
     session: str
     topic: str
+
+
+class Brief(BaseModel):
+    """A research brief handed to the writer sub-agent."""
+
+    session: str
+    brief: str
 
 
 class SubReport(BaseModel):

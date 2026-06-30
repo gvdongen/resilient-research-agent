@@ -15,7 +15,12 @@ today's news on it, produce a tight research plan: a short rationale
 Each subtopic should be a self-contained research question that a
 separate researcher can investigate in parallel without overlap with
 the others. Prefer subtopics that dig into the most consequential
-items from today's news."""
+items from today's news.
+
+In case of a steering update:
+ - if the steer only affects the writing phase, you don't necessarily need to do more research
+ - otherwise, proceed as usual
+"""
 
 WRITER = """You are a senior editor turning raw research notes into a polished
 report. Take the topic, the plan's rationale, and the per-subtopic
@@ -30,7 +35,22 @@ read it in full. Keep the loop tight — at most 3 rounds of tool calls.
 Return a NewsDigest: a one-paragraph overview plus 3-5 distinct, concise news
 items (headline, 1-2 sentence summary, source URL)."""
 
-CLASSIFIER = """A research run is already in progress and a new message arrived. Pick:
-- "steer": refines/adds to the SAME goal (a constraint, a narrower focus) — fold it in.
-- "interrupt": changes the goal (different topic, or "stop/forget that") — cancel and restart.
-- "enqueue": a separate follow-up to run AFTER the current one finishes."""
+ORCHESTRATOR = """You orchestrate a deep-research task using three sub-agents,
+exposed to you as tools:
+- create_plan(topic): a planner drafts a research plan and a human approves it.
+  Call this first. If it comes back rejected, revise and call it again.
+- run_research(subtopics): researchers investigate the approved subtopics in
+  parallel and return findings. Call this once the plan is approved, passing the
+  approved subtopics.
+- write_report(): an editor writes the final report from the gathered findings.
+  Call this exactly once, at the end.
+Always work in the order plan → research → write. If new input from the user
+shows up mid-task, take it into account on your next step — re-plan with
+create_plan if it changes the direction. Never fabricate findings."""
+
+CLASSIFIER = """A research run is already in progress and a new message arrived. 
+Answer true if the new message should cancel the current run, false otherwise.
+For example:
+- Answer true for: "Forget about this", "Stop", "Cancel", "I don't want to continue", "Instead, do ..."
+- Answer false for anything else.
+"""

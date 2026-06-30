@@ -88,6 +88,50 @@ def stub_strategy(messages: list[dict]) -> str:
     return "enqueue"
 
 
+def _last_user(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return (m.get("content") or "").strip()
+    return "the requested topic"
+
+
+def _called_tools(messages: list[dict]) -> set[str]:
+    """Names of every tool the assistant has already called in this thread."""
+    return {tc["function"]["name"] for m in messages for tc in (m.get("tool_calls") or [])}
+
+
+def _tool_call(name: str, args: dict) -> dict:
+    return {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": f"call_{name}", "type": "function",
+             "function": {"name": name, "arguments": json.dumps(args)}}
+        ],
+    }
+
+
+def stub_orchestrator(messages: list[dict]) -> dict:
+    """Drive the orchestrator agent loop deterministically: plan, then research,
+    then write — one tool call per turn, in order. A steer folded into the
+    conversation (a "New input from the user" message) triggers one fresh
+    create_plan, so re-planning on steer is visible offline."""
+    calls = [tc["function"]["name"] for m in messages for tc in (m.get("tool_calls") or [])]
+    steers = sum(1 for m in messages
+                 if m.get("role") == "user" and "New input from the user" in (m.get("content") or ""))
+
+    # (Re)plan whenever an un-absorbed steer is outstanding — including the first
+    # turn, when there are no plans and no steers yet (0 >= 0).
+    if steers >= calls.count("create_plan"):
+        return _tool_call("create_plan", {"topic": _last_user(messages)})
+
+    since_plan = calls[len(calls) - calls[::-1].index("create_plan"):]
+    if "run_research" not in since_plan:
+        return _tool_call("run_research", {"subtopics": list(_AI_FINDINGS)})
+    if "write_report" not in since_plan:
+        return _tool_call("write_report", {})
+    return {"role": "assistant", "content": "Research complete."}
+
+
 def stub_content(name: str, messages: list[dict]) -> str:
     """Canned, schema-valid JSON for the requested response model."""
     topic = last_topic(messages)
@@ -160,7 +204,11 @@ async def stub_provider(req: LLMRequest) -> dict:
     """Drop-in replacement for the provider call: returns a ModelResponse-shaped dict."""
     # Delay so parallel researchers, the concurrency cap, and the interrupt window are visible.
     await asyncio.sleep(random.uniform(STUB_DELAY * 0.5, STUB_DELAY * 15))
-    name = (req.output or {}).get("json_schema", {}).get("name", "")
+    tool_names = {t["function"]["name"] for t in (req.tools or [])}
+    if "create_plan" in tool_names:  # the orchestrator agent loop
+        return {"choices": [{"message": stub_orchestrator(req.msgs)}]}
+
+    name = (req.output_schema or {}).get("json_schema", {}).get("name", "")
     already_searched = any(m.get("role") == "tool" for m in req.msgs)
     if req.tools and not already_searched:
         message = {
@@ -171,7 +219,7 @@ async def stub_provider(req: LLMRequest) -> dict:
                     "type": "function",
                     "function": {
                         "name": "web_search",
-                        "arguments": json.dumps({"query": last_topic(req.msgs)}),
+                        "arguments": json.dumps({"queries": [last_topic(req.msgs)], "time_range": "month"}),
                     },
                 }
             ],
