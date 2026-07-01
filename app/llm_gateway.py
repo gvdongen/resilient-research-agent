@@ -19,7 +19,7 @@ llm_gateway = rst.Service("LLMGateway")
 
 
 
-# ----------- LLM Gateway ---------------------
+# FLEXIBILITY & DISTRIBUTED COMMUNICATION & FLOW CONTROL
 
 @llm_gateway.handler()
 async def call_llm(restate: Context, req: LLMRequest) -> dict:
@@ -33,7 +33,7 @@ async def call_llm(restate: Context, req: LLMRequest) -> dict:
 
 # ----------- Flow control ---------------------
 # Cap concurrent model calls across the whole department with one CLI rule:
-#   restate rules set department1 --concurrency 3
+#   restate rules set department1 --concurrency 300
 
 
 # --------- Call to LLM Gateway ---------------------

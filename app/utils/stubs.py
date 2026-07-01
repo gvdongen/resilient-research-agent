@@ -201,7 +201,7 @@ def stub_content(name: str, messages: list[dict]) -> str:
 async def stub_provider(req: LLMRequest) -> dict:
     """Drop-in replacement for the provider call: returns a ModelResponse-shaped dict."""
     # Delay so parallel researchers, the concurrency cap, and the steer/cancel window are visible.
-    await asyncio.sleep(random.uniform(STUB_DELAY * 0.5, STUB_DELAY * 15))
+    await asyncio.sleep(random.uniform(STUB_DELAY * 0.5, STUB_DELAY * 1.5))
     tool_names = {t["function"]["name"] for t in (req.tools or [])}
     if "create_plan" in tool_names:  # the orchestrator agent loop
         return {"choices": [{"message": stub_orchestrator(req.msgs)}]}

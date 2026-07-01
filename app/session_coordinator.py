@@ -15,6 +15,7 @@ controller = rst.VirtualObject("Controller")
 
 
 
+# STATEFUL ACTORS & SESSION COORDINATION & CONTROL
 
 @controller.handler()
 async def message(restate: ObjectContext, text: str) -> None:
