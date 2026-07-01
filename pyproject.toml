@@ -13,7 +13,7 @@ dependencies = [
     "hypercorn",
     "numpydoc",
     "modal>=1.4.3",
-    "restate-sdk[serde]>=1.0.0",
+    "restate-sdk[serde]>=1.0.1",
 ]
 
 [tool.uv]

@@ -1,187 +1,150 @@
-"""
-Deep Research agent
-- gets triggered by messages in a Slack channel
-- kicks of planner, parallel research agents, and writer
-- posts reply back in Slack channel
-
-Option to daily scan news on a topic
-"""
-
-from datetime import timedelta
 import restate as rst
-from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.tools import tool
 from restate import ObjectContext, Context
-from restate.ext.langchain import RestateMiddleware, restate_context
-from utils.restate_chat_model import init_durable_model
+from langchain.agents import create_agent
+from langchain_core.tools import tool
+from restate.ext.langchain import restate_context
+
+from llm_gateway import call_llm_gateway
+from session_coordinator import update_slack
+from utils.config import DEPARTMENT, MODEL
+from utils.middleware import RestateMiddleware
+from utils.prompts import *
 from utils.schemas import *
-from utils.tools import post_news, to_brief, post_plan, post_report
-from utils.tools import tavily_search, tavily_extract, tavily_crawl, Range
+from utils.tools import *
 
 
-# ----------- Durable Agents ---------------------
+# ----------- Researcher — one subtopic, in parallel ---------------------
+
 
 @tool
-async def web_search(queries: list[str], time_range: Range = "month") -> list[dict]:
+async def web_search(queries: list[str], time_range: Range = "month") -> list[str]:
     """Search the web with a list of queries. time_range is one of: day, week, month, year."""
     searches = [
-        restate_context().run_typed(f"web_search:{q}", tavily_search, query=q, range=time_range)
+        restate_context().run_typed(f"web_search:{q}", call_websearch_api, query=q, range=time_range)
         for q in queries
     ]
     await rst.gather(*searches)
-    return [await result for result in searches]
-
-
-@tool
-async def extract_urls(urls: list[str]) -> dict:
-    """Return the full readable text of a list of web pages."""
-    return await restate_context().run_typed("extract_urls", tavily_extract, urls=urls)
-
-
-@tool
-async def crawl_sites(urls: list[str], instructions: str = "") -> list[dict]:
-    """Crawl a website (guided by natural-language instructions) and return content from up to 10 pages."""
-    crawls = [
-        restate_context().run_typed(f"crawl_site:{u}", tavily_crawl, url=u, instructions=instructions)
-        for u in urls
-    ]
-    await rst.gather(*crawls)
-    return [await result for result in crawls]
+    return [await s for s in searches]
 
 
 researcher = create_agent(
-    model="openai:gpt-5",
-    tools=[web_search, extract_urls, crawl_sites],
-    system_prompt="""You are a focused research analyst. You have web_search, extract_urls,
-    and crawl_sites available. Investigate the assigned subtopic thoroughly:
-    search 3-5 topics with recency-appropriate time_range, then read the most
-    promising sources in full. Keep the loop tight — at most 2 rounds of
-    tool calls. Cite every claim with a URL. Stop as soon as you have
-    enough to write a tight 200-400 word findings section.""",
-    response_format=Report,
-    middleware=[RestateMiddleware()]
+    model="openai:" + MODEL,
+    tools=[web_search],
+    system_prompt=RESEARCHER,
+    response_format=SubReport,
+    middleware=[RestateMiddleware()],
 )
 
 research_agent = rst.Service("ResearchAgent")
 
 
 @research_agent.handler()
-async def investigate(_restate: Context, topic: str) -> Report:
+async def investigate(_restate: Context, topic: str) -> dict:
     result = await researcher.ainvoke({"messages": f"Topic: {topic}"})
-    return result["structured_response"]
+    return result["structured_response"].model_dump()
 
 
-# ----------- Durable Agentic Workflows ---------------------
 
 
-planner = create_agent(
-    model="openai:gpt-5",
-    system_prompt="""You are a senior research planner. Given a topic and a digest of
-    today's news on it, produce a tight research plan: a short rationale
-    (what's worth digging into and why) plus 3-5 sharply scoped subtopics.
-    Each subtopic should be a self-contained research question that a
-    separate researcher can investigate in parallel without overlap with
-    the others. Prefer subtopics that dig into the most consequential
-    items from today's news.""",
-    response_format=ResearchPlan,
-    middleware=[RestateMiddleware()],
-)
 
 
-writer = create_agent(
-    model="openai:gpt-5",
-    system_prompt="""You are a senior editor turning raw research notes into a polished
-    report. Take the topic, the plan's rationale, and the per-subtopic
-    findings. Write a concise report about 3-5 key findings (at most 100 words explanation).
-    Add a de-duplicated list of the top 5 source URLs. 
-    Do not invent facts beyond what the findings contain.""",
-    response_format=FinalReport,
-    middleware=[
-        RestateMiddleware(),
-        SummarizationMiddleware(
-            model=init_durable_model("openai:gpt-5"),
-            trigger=("tokens", 4000),
-            keep=("messages", 10),
-        ),
-    ],
-)
 
 
-# ----------- Durable Sessions ---------------------
 
-deep_research_agent = rst.VirtualObject("DeepResearchAgent")
+
+
+
+# ----------- Stage 1 — deep research v1 ---------
+
+deep_research_agent = rst.VirtualObject("DeepResearchAgentV1")
+
+
+
+
+
+
+
+
 
 
 @deep_research_agent.handler()
-async def research(restate: ObjectContext, query: str) -> FinalReport | None:
-    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(HumanMessage(id=str(restate.uuid()), content=query))
+async def deep_research(restate: ObjectContext, history: ChatHistory):
+    session = restate.key()
 
-    # 1 — plan
-    result = await planner.ainvoke({"messages": history.messages})
-    plan = result["structured_response"]
+    # 1. plan
+    plan = await restate.run_typed("plan", llm_call, req=plan_request(history))
 
-    # 2 - human approval of plan
-    awk_id, decision_promise = restate.awakeable(type_hint=PlanDecision)
-    await restate.run_typed("slack-message", post_plan, channel=restate.key(), plan=plan, awk_id=awk_id)
-    decision = await decision_promise
+    # 2. human approval
+    awk_id, decision = restate.awakeable(type_hint=Decision)
+    restate.object_send(update_slack, key=session, arg=format_plan(plan, awk_id))
+    if not (await decision).approved:
+        return
 
-    # Rejected - return and wait for feedback
-    if not decision.approved:
-        msg = f"Proposed plan (rejected — revise per feedback):\n{plan.model_dump_json()}"
-        return AIMessage(id=str(restate.uuid()), content=msg)
-
-    # 3 — fan out one ResearchAgent per subtopic, in parallel
-    handles = [restate.service_call(investigate, arg=sub) for sub in plan.subtopics]
+    # 3. parallel subagent research
+    handles = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
     await rst.gather(*handles)
     sub_reports = [await h for h in handles]
 
-    # 4 — synthesize the final report
-    result = await writer.ainvoke({"messages": to_brief(query, plan, sub_reports)})
-    report = result["structured_response"]
+    # 4. write
+    draft = await restate.run_typed("write", llm_call, req=write_request(history, plan, sub_reports))
 
-    # 5 — deliver the rich report card back to the channel
-    await restate.run_typed("slack-message", post_report, channel=restate.key(), topic=query, report=report)
-
-    response = AIMessage(id=str(restate.uuid()), content=report.model_dump_json())
-
-    history.messages.append(response)
-    restate.set("messages", history)
-
-    return response
+    # 5. Slack message
+    restate.object_send(update_slack, key=session, arg=format_report(draft, restate.request().id))
 
 
-# ----------- Autonomous Research ---------------------
-
-news_scout = create_agent(
-    model="openai:gpt-5",
-    tools=[web_search, extract_urls],
-    system_prompt="""You are a news scout. Given a topic, use `web_search` with
-    `time_range='day'` to find what's new in the last 24 hours. If a
-    story looks important or unclear, follow up with `extract_urls` to
-    read it in full. Keep the loop tight — at most 3 rounds of tool calls.
-    Return a NewsDigest: a one-paragraph overview plus 3-5 distinct, concise news
-    items (headline, 1-2 sentence summary, source URL).""",
-    response_format=NewsDigest,
-    middleware=[RestateMiddleware()],
-)
 
 
-@deep_research_agent.handler()
-async def scan_news(restate: ObjectContext, topic: str):
-    # News scan agent
-    result = await news_scout.ainvoke({"messages": f"Topic: {topic}"})
-    news: NewsDigest = result["structured_response"]
 
-    # Post to Slack
-    await restate.run_typed("post-news", post_news, topic=topic, channel=restate.key(), digest=news)
 
-    # Update VO state to answer questions later
-    history = await restate.get("messages", type_hint=ChatHistory) or ChatHistory()
-    history.messages.append(AIMessage(content=news.model_dump_json(), id=str(restate.uuid())))
-    restate.set("messages", history)
 
-    # Self-schedule tomorrow (same topic + channel)
-    restate.object_send(scan_news, key=restate.key(), arg=topic, send_delay=timedelta(days=1))
+
+
+
+
+
+
+
+# ----------- Stage 2 — deep research v2 -------------------
+
+deep_research_agent_v2 = rst.VirtualObject("DeepResearchAgent")
+
+
+@deep_research_agent_v2.handler()
+async def research(restate: ObjectContext, history: ChatHistory):
+    session = restate.key()
+
+    while True:
+        # one steer slot per round — raced against approval, then re-checked before writing
+        steer = restate.signal("steer", type_hint=str)
+
+        # 1 — plan
+        plan = await call_llm_gateway(restate, plan_request(history))
+
+        # 2 — research
+        sub_reports = []
+        if plan["subtopics"]:
+            # 2a - human approval — race the Approve button against a steer message
+            awk_id, decision = restate.awakeable(type_hint=Decision)
+            restate.object_send(update_slack, key=session, arg=format_plan(plan, awk_id))
+            match await rst.select(approval=decision, steer=steer):
+                case ["steer", text]:
+                    append(history, plan, sub_reports, text)
+                    continue
+                case _:
+                    pass
+
+            # 2b - subtopic research
+            handles = [restate.service_call(investigate, arg=topic) for topic in plan["subtopics"]]
+            await rst.gather(*handles)
+            sub_reports = [await h for h in handles]  # keep findings across steers
+
+        # 4 - steer (arrived while researching)
+        if text := await peek(steer):
+            append(history, plan, sub_reports, text)
+            continue
+
+        # 5 — write
+        draft = await call_llm_gateway(restate, write_request(history, plan, sub_reports))
+        break
+
+    restate.object_send(update_slack, key=session, arg=format_report(draft, restate.request().id))

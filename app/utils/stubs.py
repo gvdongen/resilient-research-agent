@@ -7,7 +7,7 @@ loop the way a real model would: emit a `web_search` tool call on the first
 researcher/news turn, then a final structured answer.
 
 A small per-call delay (`STUB_DELAY` seconds) keeps the parallel researchers, the
-flow-control queue, and the interrupt window visible in the UI.
+flow-control queue, and the steer/cancel window visible in the UI.
 """
 
 import asyncio
@@ -79,13 +79,11 @@ def last_topic(messages: list[dict]) -> str:
 
 
 def stub_strategy(messages: list[dict]) -> str:
-    """Pick steer/interrupt/enqueue from keywords so all three paths demo deterministically."""
-    text = messages[-1].get("content").lower() or ""
-    if any(w in text for w in ("forget", "instead", "stop", "never mind", "different")):
-        return "interrupt"
-    if any(w in text for w in ("also", "focus", "add", "include", "narrow", "emphasize", "too")):
-        return "steer"
-    return "enqueue"
+    """Pick cancel/steer from keywords so both paths demo deterministically."""
+    text = (messages[-1].get("content") or "").lower()
+    if any(w in text for w in ("forget", "instead", "stop", "never mind", "cancel", "different")):
+        return "cancel"
+    return "steer"
 
 
 def _last_user(messages: list[dict]) -> str:
@@ -196,13 +194,13 @@ def stub_content(name: str, messages: list[dict]) -> str:
             ],
         ).model_dump_json()
     if name == "Strategy":
-        return Strategy(strategy=stub_strategy(messages), reason="[stub] keyword heuristic").model_dump_json()
+        return Strategy(strategy=stub_strategy(messages)).model_dump_json()
     return "{}"
 
 
 async def stub_provider(req: LLMRequest) -> dict:
     """Drop-in replacement for the provider call: returns a ModelResponse-shaped dict."""
-    # Delay so parallel researchers, the concurrency cap, and the interrupt window are visible.
+    # Delay so parallel researchers, the concurrency cap, and the steer/cancel window are visible.
     await asyncio.sleep(random.uniform(STUB_DELAY * 0.5, STUB_DELAY * 15))
     tool_names = {t["function"]["name"] for t in (req.tools or [])}
     if "create_plan" in tool_names:  # the orchestrator agent loop

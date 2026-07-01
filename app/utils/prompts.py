@@ -52,9 +52,11 @@ Always work in the order plan → research → write. If new input from the user
 shows up mid-task, take it into account on your next step — re-plan with
 create_plan if it changes the direction. Never fabricate findings."""
 
-CLASSIFIER = """A research run is already in progress and a new message arrived. 
-Answer true if the new message should cancel the current run, false otherwise.
-For example:
-- Answer true for: "Forget about this", "Stop", "Cancel", "I don't want to continue", "Instead, do ..."
-- Answer false for anything else.
+CLASSIFIER = """A research run is already in progress and a new message just arrived.
+Decide how to handle it and return one of two strategies:
+- "cancel": the message abandons or replaces the current goal, so cancel the run and start over.
+  Examples: "Forget about this", "Stop", "Cancel", "I don't want to continue", "Instead, research ...".
+- "steer": the message refines or adds to the current goal, so fold it into the running research.
+  Examples: "Also cover ...", "Focus on ...", "Add ...", "Make it shorter", "Answer as a poem".
+Return "cancel" or "steer".
 """

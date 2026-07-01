@@ -34,10 +34,17 @@ def restate_services():
     sys.path.insert(0, "/root/app")
 
     import restate
-    from deep_research import deep_research_agent, research_agent
+    from session_coordinator import controller
+    from deep_research import deep_research_agent, deep_research_agent_v2, research_agent
+    from llm_gateway import llm_gateway
 
     return restate.app(
-        services=[deep_research_agent, research_agent],
+        # Modal serves ASGI request/response, not a true bidirectional HTTP/2 stream.
+        # With protocol="bidi" Restate waits out its inactivity timeout (~1 min) at
+        # every suspension point because Modal buffers the streamed response — the
+        # source of the ~60s stall before each LLM call. Request/Response mode (as
+        # used for Lambda) invokes the handler per step and ignores that timeout.
+        services=[controller, deep_research_agent, deep_research_agent_v2, research_agent, llm_gateway],
         protocol="bidi",
         identity_keys=[os.environ["RESTATE_CLOUD_PUBLICKEY"]],
     )
@@ -51,8 +58,8 @@ def restate_services():
 def slack_webhook():
     """Slack-facing endpoints:
 
-    - /slack/events        → channel message → DeepResearchAgent/{channel}/research
-    - /slack/commands      → /daily-report <topic> → DeepResearchAgent/scan_news (idempotent per topic)
+    - /slack/events        → channel message → Controller/{channel}/message (the session coordinator)
+    - /slack/commands      → /daily-report — not available in the app build (no scan_news)
     - /slack/interactivity → plan_approve / plan_reject button clicks resolve
                              the plan-approval awakeable
     """
@@ -116,11 +123,12 @@ def slack_webhook():
         if not channel or not text:
             return {}
 
-        # ResearchSession was folded into the DeepResearchAgent VO (keyed by
-        # channel), so a plain channel message kicks off a stateful research run.
+        # Every channel message goes to the Controller (the session coordinator),
+        # keyed by channel. It owns the session history + the in-flight run and
+        # decides whether to start a run, steer it, or cancel it.
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
-                f"{restate_ingress}/DeepResearchAgent/{channel}/research/send",
+                f"{restate_ingress}/Controller/{channel}/message/send",
                 headers={"Authorization": f"Bearer {restate_auth}"},
                 json=text,
             )
@@ -128,35 +136,19 @@ def slack_webhook():
 
     @api.post("/slack/commands")
     async def commands(req: Request):
-        """`/daily-report <topic>` → kick off DeepResearchAgent/scan_news."""
+        """`/daily-report` — the autonomous news-digest mode (`scan_news`) doesn't
+        exist in the app build, so this command isn't wired to a run. We
+        still verify the signature and reply gracefully (rather than 404) so the
+        Slack app config can stay unchanged."""
         ts = req.headers.get("x-slack-request-timestamp", "")
         body = await req.body()
         if not verify(body, ts, req.headers.get("x-slack-signature", "")):
             raise HTTPException(401, "bad signature")
 
-        form = parse_qs(body.decode())
-        team_id = form.get("team_id", [""])[0]
-        channel_id = form.get("channel_id", [""])[0]
-        topic = form.get("text", [""])[0].strip()
-        if not topic or not channel_id:
-            return {"response_type": "ephemeral", "text": "Usage: `/daily-report <topic>`"}
-
-        # Key on the Slack request `ts`, which stays constant across Slack's
-        # automatic retries of one command click — so retries dedup, but a
-        # fresh click (new ts) always kicks off a new run.
-        idem_key = f"{team_id}:{channel_id}:{ts}"
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{restate_ingress}/DeepResearchAgent/{channel_id}/scan_news/send",
-                headers={
-                    "Authorization": f"Bearer {restate_auth}",
-                    "idempotency-key": idem_key,
-                },
-                json=topic,
-            )
         return {
             "response_type": "ephemeral",
-            "text": f"📅 Daily report on *{topic}* scheduled. First card lands within a minute.",
+            "text": "`/daily-report` isn't available in this deployment — just send a message "
+                    "in the channel to start a research run instead.",
         }
 
     async def resolve_awakeable(client: httpx.AsyncClient, awk_id: str, value) -> bool:
@@ -170,7 +162,7 @@ def slack_webhook():
 
     @api.post("/slack/interactivity")
     async def interactivity(req: Request):
-        """Button clicks from plan-approval and news cards."""
+        """Approve button clicks from plan-approval cards."""
         body = await req.body()
         if not verify(
             body,
@@ -200,22 +192,6 @@ def slack_webhook():
                     client,
                     channel_id,
                     "✅ Plan approved — researching now. The report will land here when done."
-                    if ok
-                    else "⏰ This plan request expired. Start a new run.",
-                    thread_ts=message_ts,
-                )
-                return {}
-
-            # ---- Reject the plan → ask for feedback in the channel ----------
-            # The human just types what to change; that message re-runs the VO
-            # handler with the rejected plan in view, so the planner revises.
-            if action_id.startswith("plan_reject:"):
-                awk_id = action_id.split(":", 1)[1]
-                ok = await resolve_awakeable(client, awk_id, {"approved": False})
-                await slack_post(
-                    client,
-                    channel_id,
-                    "✏️ Plan rejected — reply here with what to change and I'll revise it."
                     if ok
                     else "⏰ This plan request expired. Start a new run.",
                     thread_ts=message_ts,

@@ -68,18 +68,21 @@ class RestateMiddleware(AgentMiddleware):
         run_options: forwarded to the LLM `ctx.run_typed` call (max attempts,
             retry intervals, ...). `serde` is set internally. Only used by the
             default journaling path.
-        call_llm / department / model: when set, the model call is routed through
-            the `LLMGateway` service handler (`call_llm`) inside the given
-            `scope(department)` — so it picks up the gateway's policy guardrail
-            and flow control — instead of the middleware's own `ctx.run_typed`.
+        call_llm: when set, the model call is routed through the `LLMGateway`
+            service handler inside `scope(DEPARTMENT)` — so it picks up the
+            gateway's policy guardrail and flow control — instead of the
+            middleware's own `ctx.run_typed`. When None (the default), the model
+            call is journaled locally via `ctx.run_typed`.
     """
 
     def __init__(
         self,
         run_options: Optional[RunOptions[Any]] = None,
+        call_llm: Optional[Any] = None,
     ):
         super().__init__()
         self._options: RunOptions[Any] = run_options or RunOptions()
+        self._call_llm = call_llm
 
     async def awrap_model_call(
         self,
