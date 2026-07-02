@@ -2,7 +2,7 @@
 name = "deep-research-agent"
 version = "0.1.0"
 description = "Restate resilient, autonomous, deep research agent."
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "pydantic-ai",
     "litellm>=1.50",
@@ -13,7 +13,7 @@ dependencies = [
     "hypercorn",
     "numpydoc",
     "modal>=1.4.3",
-    "restate-sdk[serde]>=0.18.1",
+    "restate-sdk[serde]>=1.0.1",
 ]
 
 [tool.uv]
