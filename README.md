@@ -1,9 +1,10 @@
-# A steerable, governed research agent on Restate
+# A steerable deep research agent on Restate
 
 A long-running deep-research agent — **plan → human approval → parallel researchers → writer** —
-that you can **talk to while it works**, built on [Restate](https://restate.dev). Two things make
-it more than a durable workflow:
+modeled as a stateful, persistent entity you can interact with, 
+built on [Restate](https://restate.dev). 
 
+On top of a deep reseearch workflow, it has the following features:
 - **Steer or cancel a run in flight.** A follow-up message either folds into the live run
   (*steer*) or cancels it — and its whole fan-out of researchers — and restarts on the new goal
   (*cancel*).
@@ -30,14 +31,11 @@ steering — kept side by side for comparison.)
 
 ### 1. Install and start the Restate server
 
-Flow control (scoped concurrency) needs a recent server with virtual queues enabled:
-
 ```bash
-uv sync
-docker pull docker.restate.dev/restatedev/restate:latest
 docker run -p 8080:8080 -p 9070:9070 -p 9071:9071 \
   --add-host=host.docker.internal:host-gateway \
   -e RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true \
+  -e RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true \
   docker.restate.dev/restatedev/restate:latest
 ```
 
@@ -46,6 +44,7 @@ docker run -p 8080:8080 -p 9070:9070 -p 9071:9071 \
 **With live models + web search:**
 
 ```bash
+uv sync
 export OPENAI_API_KEY=sk-...
 export TAVILY_API_KEY=tvly-...
 export SLACK_BOT_TOKEN=xoxb-...   # optional — without it, messages print to stdout
@@ -64,29 +63,52 @@ Then register the deployment: in the UI (`http://localhost:9070`) add
 `http://host.docker.internal:9080`. You should see `Controller`, `DeepResearchAgent`,
 `DeepResearchAgentV1`, `ResearchAgent`, and `LLMGateway`.
 
-### 3. Drive it
+### 3. Durable execution
+
+Every step of the run — plan, each researcher, each tool call, the writer — is journaled. Kill the
+process mid-run and restart it: Restate replays the journal, so completed steps aren't repeated and
+the run resumes exactly where it left off — no lost work, no duplicate LLM spend.
 
 ```bash
-# start a run for session "demo"
-curl localhost:8080/Controller/demo/message --json '"What is new in AI agents?"'
-
-# approve the plan (copy the awakeable curl printed in the app logs):
-curl localhost:8080/restate/awakeables/<awk_id>/resolve --json '{"approved": true}'
-
-# while it runs, send a follow-up — classified as steer or cancel:
-curl localhost:8080/Controller/demo/message --json '"also cover pricing"'              # steer
-curl localhost:8080/Controller/demo/message --json '"forget it — research X instead"'  # cancel
+scripts/message.sh demo "What's new in AI"
+# while the fan-out is running, kill the app (Ctrl-C) and restart it:
+OFFLINE=1 uv run app
 ```
 
-Offline, the classifier is keyword-based so each path is reproducible:
-*forget / instead / stop / cancel / different* → **cancel**, anything else → **steer**.
+Watch the Restate UI (`http://localhost:9070`): the invocation picks up from the last journaled
+step. Bump `STUB_DELAY` to widen the window, and set `FAILURE_PROBABILITY` in `app/utils/tools.py`
+to inject flaky web-search calls and watch Restate retry each to a journaled success.
 
-### 4. Demo the flow control
+### 4. Session coordination
+
+Start a run through the session Controller, then interact with follow-ups — all through the same
+`scripts/message.sh` (one endpoint; the Controller decides start vs. steer vs. cancel from its own
+state). Check the UI to audit execution:
 
 ```bash
-restate rules set department1 --concurrency 3   # cap concurrent model calls for the scope
+scripts/message.sh demo "What's new in AI"                      # no run in flight -> start
+scripts/message.sh demo "focus on frontier models"             # run in flight    -> steer
+scripts/message.sh demo "forget it, research AI policy instead" # run in flight    -> cancel + restart
+```
+
+After planning, the run parks on the **human approval** gate. With Slack, click the **Approve**
+button; in log mode there's no button, so the app log prints a copy-pasteable `curl` — paste it to
+resolve the approval and let the run proceed (or send a follow-up to steer/cancel instead):
+
+```bash
+curl http://localhost:8080/restate/awakeables/<awk_id>/resolve --json '{"approved": true}'
+```
+
+### 5. Flow control
+
+Cap concurrency on the scope (against your **local** server), then fire a swarm:
+
+```bash
+restate rules set department1 --concurrency 3   # local server (localhost:9070)
 scripts/swarm.sh 12                             # fire 12 runs; only 3 LLMGateway calls run at once
 ```
+
+Watch the Restate UI (`http://localhost:9070`), or query `sys_vqueues` / `sys_user_limits`.
 
 ### Knobs
 

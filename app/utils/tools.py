@@ -171,7 +171,7 @@ def post_to_slack(channel: str, text: str, awk_id: str | None = None) -> str:
     client = _slack_client()
     if client is None:
         if awk_id:
-            text = f"{text}\n\n{_approval_curl(awk_id)}"
+            text = f"{text}\n\n{_approval_curl(channel, awk_id)}"
         logger.info("\n=== Slack (channel=%s) ===\n%s\n", channel, text)
         return "log"
     try:
@@ -200,15 +200,16 @@ def _approve_button(awk_id: str) -> dict:
     }
 
 
-def _approval_curl(awk_id: str) -> str:
-    """Copy-pasteable curl to approve a plan parked on an awakeable — the log-mode
-    fallback when there's no Slack button to click. To change the plan instead,
-    send another message to the session and it steers the run."""
+def _approval_curl(channel: str, awk_id: str) -> str:
+    """Copy-pasteable next steps for a plan parked on an awakeable — the log-mode
+    fallback when there's no Slack button to click. Approve it, or send a
+    follow-up message (same session key) to steer or cancel the run."""
     url = f"{RESTATE_HOST}/restate/awakeables/{awk_id}/resolve"
     auth = "" if "localhost" in RESTATE_HOST else '-H "Authorization: Bearer $RESTATE_AUTH_TOKEN"'
     return (
         f"▶ Approve:  curl {url} {auth} --json '{{\"approved\": true}}'\n"
-        f"▶ Or steer: send another message to the session to change the plan."
+        f"▶ Steer:    scripts/message.sh {channel} \"focus on frontier models\"\n"
+        f"▶ Cancel:   scripts/message.sh {channel} \"forget it, research AI policy instead\""
     )
 
 

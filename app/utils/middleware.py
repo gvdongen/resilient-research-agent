@@ -145,7 +145,15 @@ class RestateMiddleware(AgentMiddleware):
         tools = [convert_to_openai_tool(t) for t in request.tools] if request.tools else None
         schema = getattr(request.response_format, "schema", None)  # a pydantic class; LLMRequest coerces it
 
-        llm_request = LLMRequest(model=request.model.name, msgs=msgs, tools=tools, output_schema=schema)
+        # A LangChain chat model exposes its id as `model_name`/`model`; `.name` is
+        # the (usually None) Runnable name. Fall back to LLMRequest's default model.
+        model = next(
+            (m for m in (getattr(request.model, a, None) for a in ("model_name", "model", "name")) if isinstance(m, str) and m),
+            None,
+        )
+        llm_request = LLMRequest(
+            msgs=msgs, tools=tools, output_schema=schema, **({"model": model} if model else {})
+        )
 
         # service_call is itself journaled, so no ctx.run_typed wrapper is needed.
         # Returns response["choices"][0]["message"] — the assistant message dict.

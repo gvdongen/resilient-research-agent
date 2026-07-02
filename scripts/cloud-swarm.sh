@@ -29,8 +29,9 @@ fi
 : "${RESTATE_INGRESS:?set RESTATE_INGRESS (env or .env) to your Restate Cloud ingress URL}"
 : "${RESTATE_AUTH_TOKEN:?set RESTATE_AUTH_TOKEN (env or .env) to your Restate Cloud API key}"
 
+DEFAULT_PROMPT="What's new in AI"
 N="${1:-10}"
-PROMPT="${2:-What is new in AI agents?}"
+PROMPT="${2:-$DEFAULT_PROMPT}"
 RUN="swarm-$(date +%s)"   # unique key prefix so re-runs start fresh VOs instead of queueing
 
 body=$(printf '{"messages":[{"role":"user","content":"%s"}]}' "$PROMPT")
