@@ -10,8 +10,11 @@
 #
 """LangChain agent middleware that makes a `create_agent` agent durable on Restate.
 
-- `awrap_model_call` journals each LLM response so retries replay it from the
-  journal instead of re-calling the model.
+- `awrap_model_call` routes every LLM response through the `LLMGateway` service
+  (see `_call_via_gateway`). The `service_call` is itself journaled, so retries
+  replay it from the journal instead of re-calling the model — and the call
+  inherits the gateway's policy guardrail + flow control. The gateway is the one
+  place that knows about offline mode, so online and offline take the same path.
 - `awrap_tool_call` runs parallel tool calls one at a time (via a turnstile
   keyed on `tool_call_id`) so any `ctx.run_typed(...)` calls users place in
   tool bodies appear in the journal in a stable order across replays.
@@ -22,7 +25,6 @@ inside the tool body.
 """
 
 import json
-from dataclasses import asdict
 from typing import Any, Awaitable, Callable, Optional, cast
 
 from langchain.agents.middleware import AgentMiddleware
@@ -33,7 +35,6 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from restate import RunOptions
 from restate.extensions import current_context
 from restate.ext.turnstile import Turnstile
 
@@ -61,28 +62,12 @@ class RestateMiddleware(AgentMiddleware):
     """Drop-in middleware that makes a `create_agent` agent durable on Restate.
 
     Pass it to `create_agent(..., middleware=[RestateMiddleware()])` and run
-    the agent inside a Restate handler. LLM responses are journaled; parallel
-    tool calls are linearized for deterministic replay.
-
-    Args:
-        run_options: forwarded to the LLM `ctx.run_typed` call (max attempts,
-            retry intervals, ...). `serde` is set internally. Only used by the
-            default journaling path.
-        call_llm: when set, the model call is routed through the `LLMGateway`
-            service handler inside `scope(DEPARTMENT)` — so it picks up the
-            gateway's policy guardrail and flow control — instead of the
-            middleware's own `ctx.run_typed`. When None (the default), the model
-            call is journaled locally via `ctx.run_typed`.
+    the agent inside a Restate handler. Every model call is routed through the
+    `LLMGateway` service inside `scope(DEPARTMENT)` — so it inherits the
+    gateway's policy guardrail + flow control, is journaled for durable replay,
+    and takes the identical path online and offline (the gateway alone decides).
+    Parallel tool calls are linearized for deterministic replay.
     """
-
-    def __init__(
-        self,
-        run_options: Optional[RunOptions[Any]] = None,
-        call_llm: Optional[Any] = None,
-    ):
-        super().__init__()
-        self._options: RunOptions[Any] = run_options or RunOptions()
-        self._call_llm = call_llm
 
     async def awrap_model_call(
         self,
@@ -96,16 +81,7 @@ class RestateMiddleware(AgentMiddleware):
                 "Call agent.ainvoke(...) from a handler that exposes a Restate Context."
             )
 
-        if self._call_llm is not None:
-            # Route the model call through the LLMGateway service so it inherits
-            # the gateway's policy guardrail + flow control (scope(department)).
-            journaled = await self._call_via_gateway(ctx, request)
-        else:
-            async def call_model() -> SerializableModelResponse:
-                response = await handler(request)
-                return SerializableModelResponse(**asdict(response))
-
-            journaled = await ctx.run_typed("LLM call", call_model, self._options)
+        journaled = await self._call_via_gateway(ctx, request)
 
         # If the request asked for a Pydantic schema, restore the type.
         structured_response = journaled.structured_response
@@ -137,6 +113,11 @@ class RestateMiddleware(AgentMiddleware):
         The gateway speaks OpenAI/litellm dicts, so we translate the LangChain
         request (messages, tools, response schema) on the way in and rebuild an
         AIMessage on the way out."""
+        # Imported here rather than at module load: the gateway is an app-level
+        # service, and a lazy import keeps this generic middleware free of a
+        # load-order dependency on it.
+        from llm_gateway import call_llm
+
         msgs = convert_to_openai_messages(request.messages)
         if request.system_message is not None:
             content = getattr(request.system_message, "content", request.system_message)
@@ -157,7 +138,7 @@ class RestateMiddleware(AgentMiddleware):
 
         # service_call is itself journaled, so no ctx.run_typed wrapper is needed.
         # Returns response["choices"][0]["message"] — the assistant message dict.
-        message = await ctx.scope(DEPARTMENT).service_call(self._call_llm, arg=llm_request)
+        message = await ctx.scope(DEPARTMENT).service_call(call_llm, arg=llm_request)
 
         ai_message = AIMessage(
             content=message.get("content") or "",

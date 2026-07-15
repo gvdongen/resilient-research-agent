@@ -22,7 +22,8 @@ set -euo pipefail
 
 SESSION="${1:-demo}"
 shift || true
-MESSAGE="${*:-What's new in AI}"
+DEFAULT_MESSAGE="What's new in AI"
+MESSAGE="${*:-$DEFAULT_MESSAGE}"
 INGRESS="${INGRESS:-http://localhost:8080}"
 
 echo "[$SESSION] sending: $MESSAGE"

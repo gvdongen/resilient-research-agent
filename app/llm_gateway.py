@@ -8,17 +8,6 @@ from utils.tools import llm_call
 llm_gateway = rst.Service("LLMGateway")
 
 
-
-
-
-
-
-
-
-
-
-
-
 # FLEXIBILITY & DISTRIBUTED COMMUNICATION & FLOW CONTROL
 
 @llm_gateway.handler()
@@ -40,12 +29,3 @@ async def call_llm(restate: Context, req: LLMRequest) -> dict:
 
 async def call_llm_gateway(restate: Context, req: LLMRequest) -> dict:
     return await restate.scope(DEPARTMENT).service_call(call_llm, arg=req)
-
-
-
-
-
-
-
-
-

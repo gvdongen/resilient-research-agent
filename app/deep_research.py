@@ -4,9 +4,9 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool
 from restate.ext.langchain import restate_context
 
-from llm_gateway import call_llm, call_llm_gateway
+from llm_gateway import call_llm_gateway
 from session_coordinator import update_slack
-from utils.config import DEPARTMENT, MODEL
+from utils.config import MODEL
 from utils.middleware import RestateMiddleware
 from utils.prompts import *
 from utils.schemas import *
@@ -32,9 +32,7 @@ researcher = create_agent(
     tools=[web_search],
     system_prompt=RESEARCHER,
     response_format=SubReport,
-    # Offline: route the researcher's model calls through the gateway so the
-    # canned stub drives them too (no OpenAI). Online: call the model directly.
-    middleware=[RestateMiddleware(call_llm=call_llm if OFFLINE else None)],
+    middleware=[RestateMiddleware()],
 )
 
 research_agent = rst.Service("ResearchAgent")
@@ -46,26 +44,9 @@ async def investigate(_restate: Context, topic: str) -> dict:
     return result["structured_response"].model_dump()
 
 
-
-
-
-
-
-
-
-
-
-
 # ----------- Stage 1 — deep research v1 ---------
 
 deep_research_agent = rst.VirtualObject("DeepResearchAgentV1")
-
-
-
-
-
-
-
 
 
 # DURABLE EXECUTION FOR LONG-RUNNING AGENTS
@@ -93,18 +74,6 @@ async def deep_research(restate: ObjectContext, history: ChatHistory):
 
     # 5. Slack message
     restate.object_send(update_slack, key=session, arg=format_report(draft, restate.request().id))
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ----------- Stage 2 — deep research v2 -------------------

@@ -70,7 +70,7 @@ process mid-run and restart it: Restate replays the journal, so completed steps 
 the run resumes exactly where it left off — no lost work, no duplicate LLM spend.
 
 ```bash
-scripts/message.sh demo "What's new in AI"
+scripts/message.sh session55 "What's new in AI"
 # while the fan-out is running, kill the app (Ctrl-C) and restart it:
 OFFLINE=1 uv run app
 ```
@@ -86,9 +86,9 @@ Start a run through the session Controller, then interact with follow-ups — al
 state). Check the UI to audit execution:
 
 ```bash
-scripts/message.sh demo "What's new in AI"                      # no run in flight -> start
-scripts/message.sh demo "focus on frontier models"             # run in flight    -> steer
-scripts/message.sh demo "forget it, research AI policy instead" # run in flight    -> cancel + restart
+scripts/message.sh session55 "What's new in AI"                      
+scripts/message.sh session55 "focus on frontier models"             
+scripts/message.sh session55 "forget it, research AI policy instead" 
 ```
 
 After planning, the run parks on the **human approval** gate. With Slack, click the **Approve**
@@ -104,8 +104,8 @@ curl http://localhost:8080/restate/awakeables/<awk_id>/resolve --json '{"approve
 Cap concurrency on the scope (against your **local** server), then fire a swarm:
 
 ```bash
-restate rules set department1 --concurrency 3   # local server (localhost:9070)
-scripts/swarm.sh 12                             # fire 12 runs; only 3 LLMGateway calls run at once
+restate rules set department1 --concurrency 3 
+scripts/swarm.sh 12                            
 ```
 
 Watch the Restate UI (`http://localhost:9070`), or query `sys_vqueues` / `sys_user_limits`.

@@ -10,11 +10,6 @@ from utils.tools import post_to_slack, user, assistant, classify_request
 controller = rst.VirtualObject("Controller")
 
 
-
-
-
-
-
 # BEYOND WORKFLOWS: STATEFUL ACTORS & SESSION COORDINATION & CONTROL
 
 @controller.handler()
@@ -41,18 +36,6 @@ async def message(restate: ObjectContext, text: str) -> None:
     from deep_research import research
     handle = restate.object_send(research, key=restate.key(), arg=history)
     restate.set("current", await handle.invocation_id())
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @controller.handler()
